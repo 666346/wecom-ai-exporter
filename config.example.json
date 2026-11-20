@@ -1,0 +1,9 @@
+{
+  "_readme": "复制本文件为 config.json 后，把下面的 REPLACE_WITH_... 占位符改成你本机的实际路径。config.json 已被 .gitignore 忽略，不会上传。",
+  "python": "REPLACE_WITH_PROJECT_DIR\\.venv\\Scripts\\python.exe",
+  "root": "REPLACE_WITH_PROJECT_DIR",
+  "wxwork_root": "REPLACE_WITH_WXWORK_DATA_ROOT",
+  "export_root": "REPLACE_WITH_EXPORT_FOLDER",
+  "cache_ttl_seconds": 1800,
+  "accounts": []
+}

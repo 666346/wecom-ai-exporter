@@ -1,0 +1,52 @@
+# ------- 虚拟环境 / Python 缓存 -------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ------- 本机配置与密钥（绝不上传） -------
+config.json
+config.local.json
+*key*.txt
+*keys*.json
+wxwork_keys.json
+watch_groups.txt
+codex_mcp_config.txt
+*.pem
+*.token
+*.secret
+
+# ------- 运行时产物 / 数据库 / 日志 -------
+runtime/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.pid
+*.lock
+
+# ------- 解密产物与导出的聊天记录 / 附件 -------
+decrypt/windows/export/
+企业微信导出/
+exports/
+output/
+chat.md
+chat.media.json
+chat.assets-*/
+ALL_FOR_AI.md
+发给AI/
+
+# ------- 本地测试与临时文件 -------
+_smoke*
+_ui_*
+_http_*
+test_*.tmp
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db

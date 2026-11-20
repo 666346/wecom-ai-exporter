@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>企微 AI 导出工具</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --border:#e5e7eb; --text:#1f2937; --muted:#6b7280;
+  --primary:#2563eb; --primary-soft:#eff6ff; --ok:#16a34a; --warn:#d97706; --danger:#dc2626;
+  --shadow:0 1px 2px rgba(16,24,40,.04),0 4px 14px rgba(16,24,40,.04);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{max-width:1320px;margin:0 auto;padding:24px 20px 60px}
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:21px;margin:0;letter-spacing:.3px}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.pill{display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);
+  border-radius:999px;padding:6px 12px;font-size:12px;color:var(--muted);box-shadow:var(--shadow)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#9ca3af}
+.dot.ok{background:var(--ok)} .dot.off{background:var(--danger)} .dot.idle{background:#f59e0b}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin-bottom:16px;box-shadow:var(--shadow)}
+.card h2{font-size:15px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+.card .desc{color:var(--muted);font-size:12px;margin:0 0 14px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.acct{border:1px solid var(--border);border-radius:10px;padding:11px 13px;background:#fcfcfd}
+.acct-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.acct-meta{color:var(--muted);font-size:12px;margin-top:4px}
+.tag{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
+.tag.ok{color:var(--ok);border-color:#bbf7d0;background:#f0fdf4}
+.tag.off{color:var(--danger);border-color:#fecaca;background:#fef2f2}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.small{font-size:12px;color:var(--muted)}
+.btn{border:1px solid var(--border);background:#fff;color:var(--text);border-radius:9px;padding:8px 15px;
+  font-size:13px;cursor:pointer;transition:.15s;font-family:inherit}
+.btn:hover{background:#f3f4f6;border-color:#d1d5db}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.primary:hover{background:#1d4ed8}
+.btn.ghost{background:var(--primary-soft);border-color:#bfdbfe;color:#1d4ed8}
+.btn.danger{color:var(--danger);border-color:#fecaca}
+input[type=text],input[type=search],input[type=datetime-local]{border:1px solid var(--border);border-radius:9px;
+  padding:8px 11px;font-size:12.5px;font-family:inherit;outline:none;background:#fff;color:var(--text)}
+input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+#search{flex:1;min-width:220px}
+.split{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:16px}
+@media(max-width:1000px){.split{grid-template-columns:1fr}}
+.tablebox{border:1px solid var(--border);border-radius:10px;overflow:auto;max-height:640px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #f1f2f4;white-space:nowrap}
+th{position:sticky;top:0;background:#fafbfc;font-weight:600;color:var(--muted);z-index:1}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:#f8fafc}
+tbody tr.sel{background:var(--primary-soft)}
+td.gname{white-space:normal;min-width:190px;max-width:300px;font-weight:500}
+td.num{text-align:right}
+.panel{border:1px solid var(--border);border-radius:10px;background:#fcfcfd;display:flex;flex-direction:column;min-height:640px}
+.filters{padding:11px 12px;border-bottom:1px solid var(--border);background:#fff;border-radius:10px 10px 0 0}
+.frow{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.frow:last-child{margin-bottom:0}
+.fbtn{border:1px solid var(--border);background:#fff;border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer;font-family:inherit;color:var(--muted)}
+.fbtn:hover{border-color:#bfdbfe;color:#1d4ed8}
+.fbtn.on{background:var(--primary);border-color:var(--primary);color:#fff}
+.tools{display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:9px 12px;border-bottom:1px solid var(--border);background:#fafbfc}
+.tools .btn{padding:5px 10px;font-size:12px}
+.selstat{font-size:12.5px;font-weight:600;color:#1d4ed8;margin-left:auto;white-space:nowrap}
+.msg-list{flex:1;max-height:520px;overflow:auto;padding:4px 12px 10px}
+.msg-item{display:flex;gap:9px;padding:9px 6px;border-bottom:1px dashed #e8eaed;border-radius:6px}
+.msg-item:hover{background:#f8fafc}
+.msg-item.selmsg{background:#f5f9ff}
+.msg-item .mcheck{margin-top:4px;flex:none;width:15px;height:15px;cursor:pointer}
+.msg-body{flex:1;min-width:0}
+.msg-meta{display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-bottom:3px}
+.msg-meta b{color:var(--text);font-size:12px}
+.msg-text{margin:0;white-space:pre-wrap;word-break:break-word;font:12.5px/1.55 inherit;color:#374151}
+.files{display:flex;gap:5px;flex-wrap:wrap;margin-top:5px}
+.filetag{font-size:11px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:6px;padding:1px 7px;word-break:break-all}
+.mini{border:1px solid #bfdbfe;background:var(--primary-soft);color:#1d4ed8;border-radius:6px;
+  padding:1px 7px;font-size:11px;cursor:pointer;font-family:inherit}
+.mini:hover{background:#dbeafe}
+.hint{color:var(--muted);font-size:12.5px;padding:8px 0}
+.more{padding:8px 12px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin:12px 0}
+.stat{border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:#fcfcfd}
+.stat b{display:block;font-size:20px;line-height:1.2}
+.stat span{color:var(--muted);font-size:11.5px}
+.path{font-size:12.5px;margin:5px 0;word-break:break-all}
+code{background:#f3f4f6;border-radius:5px;padding:2px 6px;font-size:12px}
+.missing{margin:12px 0;border:1px solid #fde68a;background:#fffbeb;border-radius:10px;padding:10px 12px;font-size:12px;max-height:190px;overflow:auto}
+.missing div{padding:1px 0;color:#92400e}
+.filelist{margin:10px 0;border:1px solid var(--border);border-radius:10px;padding:9px 12px;font-size:12px;max-height:200px;overflow:auto;background:#fcfcfd}
+.filelist div{padding:2px 0;color:#374151}
+#logs{background:#0f172a;color:#cbd5e1;border-radius:10px;padding:12px;font:11.5px/1.6 ui-monospace,Consolas,monospace;
+  height:170px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+#taskLog{background:#f8fafc;border:1px dashed var(--border);border-radius:9px;padding:9px 11px;
+  font:11.5px/1.55 ui-monospace,Consolas,monospace;max-height:130px;overflow:auto;white-space:pre-wrap;margin:10px 0}
+#msgbar{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#111827;color:#fff;
+  padding:9px 18px;border-radius:999px;font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.18);
+  opacity:0;pointer-events:none;transition:.25s;z-index:99;max-width:90vw;text-align:center}
+#msgbar.show{opacity:1}
+#msgbar.err{background:var(--danger)}
+label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;user-select:none}
+.foot{color:var(--muted);font-size:11.5px;text-align:center;margin-top:18px}
+.scope{background:var(--primary-soft);border:1px solid #bfdbfe;color:#1e40af;border-radius:9px;
+  padding:9px 12px;font-size:12.5px;margin-bottom:12px}
+.fwd{margin-top:8px;border:1px solid #bfdbfe;border-radius:9px;background:#f8fbff;overflow:hidden}
+.fwd>summary{cursor:pointer;padding:7px 11px;font-size:12px;font-weight:600;color:#1e40af;
+  list-style:none;display:flex;gap:8px;align-items:center;user-select:none}
+.fwd>summary::-webkit-details-marker{display:none}
+.fwd>summary::before{content:'▾';color:#3b82f6;font-size:11px}
+.fwd:not([open])>summary::before{content:'▸'}
+.fwd-body{border-top:1px solid #dbeafe;padding:6px 12px 10px;max-height:560px;overflow:auto;background:#fff}
+.fwd-item{padding:8px 0;border-bottom:1px dashed #e5ebff}
+.fwd-item:last-child{border-bottom:none}
+.fwd-meta{font-size:11px;color:var(--muted);margin-bottom:3px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.fwd-meta b{color:var(--text);font-size:11.5px}
+.fwd-text{font-size:12px;white-space:pre-wrap;word-break:break-word;color:#374151;margin:0}
+.fwd-files{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;align-items:flex-start}
+.fwd-thumb{width:104px;height:104px;object-fit:cover;border-radius:8px;border:1px solid var(--border);
+  background:#f8fafc;cursor:zoom-in;transition:.15s}
+.fwd-thumb:hover{transform:scale(1.04);border-color:#93c5fd}
+.fwd-file{font-size:11px;background:#fff;border:1px solid var(--border);border-radius:7px;
+  padding:5px 9px;color:#92400e;word-break:break-all;max-width:280px}
+.fwd-miss{color:var(--warn);display:block;margin-top:2px;font-size:10.5px}
+.live .dot.liveok{background:var(--ok);animation:pulse 2.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <h1>企微 AI 导出工具</h1>
+    <div class="sub">本地离线运行 · 按时间筛选 + 勾选当前单子 · 附件按聊天顺序编号打包给 AI</div>
+  </div>
+  <div class="row">
+    <span class="pill"><span class="dot ok" id="svcDot"></span>本地服务 127.0.0.1:8765</span>
+    <span class="pill"><span class="dot" id="wecomDot"></span><span id="wecom">检测中…</span></span>
+    <span class="pill live"><span class="dot liveok" id="liveDot"></span><span id="liveState">实时同步待命</span></span>
+  </div>
+</header>
+
+<section class="card">
+  <h2>① 账号与状态</h2>
+  <p class="desc">切换企业微信账号后点「重新扫描账号与密钥」，即可把新账号的会话一起纳进来。</p>
+  <div class="grid" id="acct"></div>
+  <div class="row" style="margin-top:12px">
+    <button class="btn ghost" id="btnRescan">重新扫描企微账号与密钥</button>
+    <button class="btn" id="btnReload">刷新会话列表</button>
+    <span class="small" id="locked"></span>
+  </div>
+</section>
+
+<section class="card">
+  <h2>② 群聊筛选 · 按时间勾选当前单子</h2>
+  <p class="desc">左侧搜索框输入后 300ms 自动选中第一条匹配并联动右侧；合并转发卡片默认展开成嵌套对话，可看文字与缩略图。右侧每 8 秒静默同步新消息，保留勾选与滚动。</p>
+  <div class="row" style="margin-bottom:10px">
+    <input type="search" id="search" placeholder="搜索群名或 conversation-id，例如：项目名 / 客户名 / R:...">
+    <span class="small" id="groupCount">—</span>
+  </div>
+  <div class="split">
+    <div class="tablebox">
+      <table>
+        <thead><tr><th>同步</th><th>群名</th><th>所属账号</th><th>消息数</th><th>最后活跃</th><th>conversation-id</th></tr></thead>
+        <tbody id="groups"></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <div class="filters">
+        <div class="frow">
+          <span class="small" style="margin-right:2px">快捷</span>
+          <button class="fbtn" data-range="all">全部</button>
+          <button class="fbtn" data-range="today">今天</button>
+          <button class="fbtn" data-range="3d">近3天</button>
+          <button class="fbtn on" data-range="7d">近7天</button>
+          <button class="fbtn" data-range="30d">近30天</button>
+        </div>
+        <div class="frow">
+          <span class="small">自定义</span>
+          <input type="datetime-local" id="dtStart" title="开始日期时间">
+          <span class="small">到</span>
+          <input type="datetime-local" id="dtEnd" title="结束日期时间">
+          <button class="fbtn" id="btnCustom">应用时间段</button>
+        </div>
+      </div>
+      <div class="tools">
+        <button class="btn" id="btnAll">全选</button>
+        <button class="btn" id="btnInvert">反选</button>
+        <button class="btn" id="btnNone">清空</button>
+        <span class="selstat" id="selStat">已选 0 条消息 / 含 0 个附件</span>
+      </div>
+      <div class="small" id="selInfo" style="padding:8px 12px 0">未选择群聊</div>
+      <div class="msg-list" id="msgList"><div class="hint">点击左侧群聊查看消息。</div></div>
+      <div class="more" id="moreWrap" style="display:none">
+        <span id="moreInfo"></span> · <button class="fbtn" id="btnMore">加载更多</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>③ 一键导出给 AI</h2>
+  <p class="desc">只导出右侧已勾选的消息；合并转发卡片在原位置按子消息时间正序完整展开，图片/文件与主聊天共用 001、002… 统一编号。</p>
+  <div class="scope" id="exportScope">请先在右侧勾选消息</div>
+  <div class="row">
+    <button class="btn primary" id="btnExport" disabled>一键导出给 AI</button>
+    <button class="btn" id="btnOpen" disabled>打开导出文件夹</button>
+    <span class="small">输出：桌面\企业微信导出\&lt;群名&gt;\发给AI\</span>
+  </div>
+  <div id="taskLog" style="display:none"></div>
+  <div id="exportResult"><div class="hint">先在上方选中群并勾选消息，再点击「一键导出给 AI」。</div></div>
+</section>
+
+<section class="card">
+  <h2>④ 每 5 分钟自动同步</h2>
+  <p class="desc">开关由本界面控制，无需额外后台脚本；无新消息时自动跳过，不重复复制附件。</p>
+  <div class="row">
+    <button class="btn" id="btnSync">开启自动同步</button>
+    <span class="pill"><span class="dot idle" id="syncDot"></span><span id="syncState">未开启</span></span>
+    <span class="small">最近同步：<b id="lastSync">—</b></span>
+    <span class="small">已加入 <b id="watchCount">0</b> 个群</span>
+  </div>
+  <div style="margin-top:12px"><div class="small" style="margin-bottom:5px">实时日志</div><div id="logs">加载中…</div></div>
+</section>
+
+<div class="foot">数据全部留在本机 · 导出目录：<span id="exportRoot" class="mono">—</span></div>
+</div>
+<div id="msgbar"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const S = { groups:[], watched:[], selected:null, syncEnabled:false, lastOutDir:null,
+            range:'7d', messages:[], selIds:new Set(), rendered:0, PAGE:150,
+            lastId:'', liveBusy:false, liveAt:'', searchTimer:null, loadSeq:0 };
+let msgTimer = null;
+
+function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function setMsg(text, err){
+  const el=$('#msgbar'); el.textContent=text; el.className='show'+(err?' err':'');
+  clearTimeout(msgTimer); msgTimer=setTimeout(()=>{el.className='';}, 4200);
+}
+async function api(path, body){
+  const opt = body===undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const txt = await r.text();
+  let d; try{ d=JSON.parse(txt); }catch(e){ throw new Error('返回不是 JSON: '+txt.slice(0,180)); }
+  if(!r.ok && !d.error) throw new Error('HTTP '+r.status);
+  if(d.error) throw new Error(d.error);
+  return d;
+}
+
+function renderAccounts(st){
+  $('#acct').innerHTML = (st.accounts||[]).map(a=>`
+    <div class="acct">
+      <div class="acct-top"><span class="dot ${a.online?'ok':'off'}"></span><b class="mono">${esc(a.id)}</b>
+        <span class="tag ${a.online?'ok':'off'}">${a.online?'已解锁 · 在线':'不可用'}</span></div>
+      <div class="acct-meta">${a.conversations} 个会话 · ${a.db_mb} MB · 最后写入 ${esc(a.last_write||'—')}</div>
+    </div>`).join('') || '<div class="hint">未配置账号</div>';
+  $('#wecom').textContent = st.wecom_running ? '企业微信运行中' : '未检测到企业微信进程';
+  $('#wecomDot').className = 'dot '+(st.wecom_running?'ok':'off');
+  $('#locked').textContent = st.locked_accounts && st.locked_accounts.length
+    ? '还有 '+st.locked_accounts.length+' 个账号未解锁：在企微里登录/切换后点「重新扫描」'
+    : '全部账号已解锁';
+  $('#exportRoot').textContent = st.export_root || '';
+}
+
+function filterGroups(){
+  const kw=($('#search').value||'').trim().toLowerCase();
+  return S.groups.filter(g => !kw || String(g.name||'').toLowerCase().includes(kw) ||
+                              String(g.id||'').toLowerCase().includes(kw));
+}
+
+function renderGroups(){
+  const list = filterGroups();
+  $('#groupCount').textContent = list.length+' / '+S.groups.length+' 个会话';
+  $('#groups').innerHTML = list.map(g=>{
+    const sel = S.selected && S.selected.id===g.id && S.selected.account===g.account;
+    const w = S.watched.includes(g.id);
+    return `<tr class="${sel?'sel':''}" data-key="${esc(g.account+'|'+g.id)}">
+      <td><input type="checkbox" class="watchbox" data-id="${esc(g.id)}" ${w?'checked':''} title="加入定时同步"></td>
+      <td class="gname">${esc(g.name||'')}</td>
+      <td class="mono small">${esc(g.account)}</td>
+      <td class="num">${g.messages||0}</td>
+      <td class="small">${esc(g.last_time||'')}</td>
+      <td class="mono small">${esc(g.id)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="hint">没有匹配的会话</td></tr>';
+  $$('#groups tr[data-key]').forEach(tr=>tr.addEventListener('click', e=>{
+    if(e.target.classList.contains('watchbox')) return;
+    const parts = tr.dataset.key.split('|');
+    const g = S.groups.find(x => x.account===parts[0] && x.id===parts.slice(1).join('|'));
+    if(g) selectGroup(g);
+  }));
+  $$('.watchbox').forEach(cb=>cb.addEventListener('change', e=>{ e.stopPropagation(); toggleWatch(cb.dataset.id, cb.checked); }));
+}
+
+function setLiveState(text, cls){
+  $('#liveState').textContent = text;
+  $('#liveDot').className = 'dot ' + (cls || 'liveok');
+}
+
+async function selectGroup(g){
+  if(!g) return;
+  S.selected=g; S.lastId=''; renderGroups();
+  $('#selInfo').innerHTML = `当前选中：<b>${esc(g.name)}</b> <span class="mono">${esc(g.id)}</span> · 共 ${g.messages} 条`;
+  await loadMessages();
+}
+
+function buildMsgUrl(){
+  const g=S.selected; if(!g) return '';
+  let url='/api/messages?cid='+encodeURIComponent(g.id)+'&account='+encodeURIComponent(g.account)+'&range='+encodeURIComponent(S.range);
+  if(S.range==='custom'){
+    url += '&start='+encodeURIComponent($('#dtStart').value||'')+'&end='+encodeURIComponent($('#dtEnd').value||'');
+  }
+  return url;
+}
+
+async function loadMessages(){
+  if(!S.selected) return;
+  const g=S.selected, seq=++S.loadSeq;
+  $('#msgList').innerHTML='<div class="hint">正在读取并清洗消息…</div>';
+  $('#moreWrap').style.display='none';
+  try{
+    const r=await api(buildMsgUrl());
+    if(seq!==S.loadSeq || S.selected!==g) return;   // 防抖/切群后丢弃过期响应
+    S.messages=r.messages||[];
+    S.lastId=r.last_id||'';
+    S.selIds=new Set(S.messages.map(m=>m.id));   // 默认全选当前筛选结果
+    renderMsgList(true); updateSelStat();
+    const win = r.from || r.to ? `（${r.from||'最早'} ~ ${r.to||'现在'}）` : '（全部时间）';
+    $('#selInfo').innerHTML = `当前选中：<b>${esc(g.name)}</b> <span class="mono">${esc(g.id)}</span><br>
+      <span class="small">筛选结果 ${r.count} / ${r.total} 条，时间正序 ${win}</span>`;
+    setLiveState('实时同步中 · 上次更新 '+(S.liveAt||'刚刚'), 'liveok');
+  }catch(e){ $('#msgList').innerHTML='<div class="hint">读取失败：'+esc(e.message)+'</div>'; }
+}
+
+function forwardHTML(m){
+  const c=m.forward, g=S.selected;
+  if(!c || !g) return '';
+  const base='/api/thumb?cid='+encodeURIComponent(g.id)+'&account='+encodeURIComponent(g.account)+
+             '&mid='+encodeURIComponent(m.id);
+  const subs=(c.subs||[]).map((s,si)=>{
+    const files=(s.files||[]).map((f,fi)=>{
+      const label=esc(f.name||'图片');
+      if(f.thumb){
+        const src=base+'&i='+si+'&j='+fi;
+        return `<img class="fwd-thumb" loading="lazy" src="${src}" data-full="${src}" title="${label} · 点击放大">`;
+      }
+      return `<span class="fwd-file">📎 ${label}<span class="fwd-miss">未缓存：点开该合并转发卡片并查看原图/下载文件后重新导出</span></span>`;
+    }).join('');
+    return `<div class="fwd-item">
+      <div class="fwd-meta"><span class="mono">${esc(s.time)}</span><b>${esc(s.sender)}</b>
+        <span class="tag">${esc(s.kind)}</span></div>
+      <p class="fwd-text">${esc(s.text||'（图片/文件，无文字正文）')}</p>
+      ${files?`<div class="fwd-files">${files}</div>`:''}
+    </div>`;
+  }).join('');
+  return `<details class="fwd" open>
+    <summary>🧩 合并转发 · ${esc(c.title)} · ${c.count} 条子消息 / ${c.images} 个图片与文件（已精准匹配 ${c.matched}）</summary>
+    <div class="fwd-body">${subs}</div></details>`;
+}
+
+function msgHTML(m){
+  const on=S.selIds.has(m.id);
+  const files=(m.files||[]).map(f=>`<span class="filetag">📎 ${esc(f)}</span>`).join('');
+  return `<div class="msg-item ${on?'selmsg':''}" data-id="${esc(m.id)}">
+    <input type="checkbox" class="mcheck" data-id="${esc(m.id)}" ${on?'checked':''} title="勾选这条消息">
+    <div class="msg-body">
+      <div class="msg-meta"><span class="mono">${esc(m.time)}</span><b>${esc(m.sender)}</b>
+        <span class="tag">${esc(m.type)}</span>
+        <button class="mini" data-from="${esc(m.id)}" title="清空后只选这条到最后，跳过前面的旧单子">从此条往后全选</button></div>
+      <div class="msg-text">${esc(m.content)}</div>
+      ${files?`<div class="files">${files}</div>`:''}
+      ${m.forward?forwardHTML(m):''}
+    </div></div>`;
+}
+
+function renderMsgList(reset){
+  const box=$('#msgList');
+  if(reset){ box.innerHTML=''; S.rendered=0; }
+  const slice=S.messages.slice(S.rendered, S.rendered+S.PAGE);
+  box.insertAdjacentHTML('beforeend', slice.map(msgHTML).join('') ||
+                         (reset?'<div class="hint">该时间段没有消息</div>':''));
+  S.rendered += slice.length;
+  $('#moreWrap').style.display = S.rendered < S.messages.length ? 'block' : 'none';
+  $('#moreInfo').textContent = `已显示 ${S.rendered} / ${S.messages.length} 条`;
+}
+
+async function pollChanges(){
+  if(!S.selected || S.liveBusy) return;
+  const g=S.selected;
+  S.liveBusy=true;
+  try{
+    const r=await api('/api/changes?cid='+encodeURIComponent(g.id)+
+                      '&account='+encodeURIComponent(g.account)+
+                      '&last_id='+encodeURIComponent(S.lastId));
+    if(!r.ok) throw new Error(r.error||'检查失败');
+    S.liveAt=r.last_updated;
+    setLiveState('实时同步中 · 上次更新 '+r.last_updated,
+                 r.method==='pending'?'idle':'liveok');
+    if(r.changed && S.selected===g && !document.hidden) await mergeMessages();
+  }catch(e){ setLiveState('实时同步暂时不可用：'+e.message, 'off'); }
+  finally{ S.liveBusy=false; }
+}
+
+async function mergeMessages(){
+  // 增量刷新：只在列表末尾追加新节点，保留已有勾选状态与滚动位置
+  const g=S.selected; if(!g) return;
+  const r=await api(buildMsgUrl());
+  if(S.selected!==g) return;
+  const fresh=r.messages||[];
+  const oldIds=new Set(S.messages.map(m=>m.id));
+  const added=fresh.filter(m=>!oldIds.has(m.id));
+  S.messages=fresh; S.lastId=r.last_id||'';
+  if(!added.length){ updateSelStat(); return; }
+  for(const m of added) S.selIds.add(m.id);   // 新进来的消息自动勾选
+  const box=$('#msgList'), scroll=box.scrollTop;
+  const tailStart=fresh.length-added.length;
+  const isTail=tailStart>=0 && added.every((m,i)=>fresh[tailStart+i] && fresh[tailStart+i].id===m.id);
+  if(isTail && S.rendered===tailStart && S.rendered>0){
+    box.insertAdjacentHTML('beforeend', added.map(msgHTML).join(''));
+    S.rendered += added.length;
+    $('#moreWrap').style.display = S.rendered < S.messages.length ? 'block' : 'none';
+    $('#moreInfo').textContent = `已显示 ${S.rendered} / ${S.messages.length} 条`;
+  }else{
+    renderMsgList(true);
+  }
+  box.scrollTop=scroll;
+  syncChecks(); updateSelStat();
+  setMsg('实时同步：新增 '+added.length+' 条消息，已自动勾选');
+}
+
+function syncChecks(){
+  $$('#msgList .mcheck').forEach(cb=>{
+    const on=S.selIds.has(cb.dataset.id);
+    cb.checked=on; cb.closest('.msg-item').classList.toggle('selmsg',on);
+  });
+}
+function updateSelStat(){
+  let n=0,f=0;
+  for(const m of S.messages) if(S.selIds.has(m.id)){ n++; f+=(m.files||[]).length; }
+  $('#selStat').textContent=`已选 ${n} 条消息 / 含 ${f} 个附件`;
+  $('#btnExport').disabled = !S.selected || n===0;
+  $('#exportScope').textContent = n
+    ? `本次只导出这 ${n} 条消息，以及这些消息明确提到、并在当前账号缓存里精准匹配到的 ${f} 个附件；不会混入其它群或旧单子。`
+    : '请先在右侧勾选消息';
+}
+
+async function toggleWatch(id, on){
+  if(on && !S.watched.includes(id)) S.watched.push(id);
+  if(!on) S.watched = S.watched.filter(x=>x!==id);
+  try{
+    await api('/api/watch', {ids:S.watched});
+    $('#watchCount').textContent = S.watched.length;
+    renderGroups();
+    setMsg('定时同步清单已更新（'+S.watched.length+' 个群）');
+  }catch(e){ setMsg('更新失败：'+e.message, true); }
+}
+
+async function pollTask(id, done){
+  let r;
+  try{ r=await api('/api/task?id='+id); }
+  catch(e){ done({status:'error', error:e.message, log:[]}); return; }
+  const box=$('#taskLog'); box.style.display='block'; box.textContent=(r.log||[]).join('\n')||'处理中…';
+  if(r.status==='running'){ setTimeout(()=>pollTask(id,done), 1500); return; }
+  done(r);
+}
+
+function renderExport(task){
+  if(task.status==='error'){
+    $('#exportResult').innerHTML='<div class="missing" style="border-color:#fecaca;background:#fef2f2;color:#991b1b">导出失败：'+esc(task.error||'未知错误')+'</div>';
+    setMsg('导出失败', true); return;
+  }
+  const d=task.result||{}, miss=d.missing||[], ai=d.all_for_ai||{}, files=d.files||[];
+  $('#exportResult').innerHTML=`
+    <div class="stats">
+      <div class="stat"><b>${d.messages||0}</b><span>已选消息（时间正序）</span></div>
+      <div class="stat"><b>${d.attachments_ok||0}</b><span>精准匹配附件</span></div>
+      <div class="stat"><b>${ai.documents||0}</b><span>展开的文档正文</span></div>
+      <div class="stat"><b>${ai.images||0}</b><span>图片附件</span></div>
+      <div class="stat"><b>${ai.forward_cards||0}</b><span>合并转发卡片 / ${ai.forward_subs||0} 条子消息</span></div>
+      <div class="stat"><b>${miss.length}</b><span>附件未下载</span></div>
+    </div>
+    <div class="path">📄 聊天记录：<code>${esc(d.chat_md||'—')}</code></div>
+    <div class="path">📄 单文件汇总：<code>${esc(ai.path||'—')}</code> ${ai.size_kb||0} KB</div>
+    <div class="path">📁 导出目录（Ctrl+A 全选拖给 AI）：<code>${esc(d.out_dir||'')}</code></div>
+    <div class="filelist"><b>按聊天顺序编号的附件（共 ${files.length} 个）</b>
+      ${files.length? files.slice(0,30).map(x=>`<div>${esc(x.number)} · ${esc(x.time)} · <code>${esc(x.renamed)}</code> ${x.size_kb} KB <span class="small">${esc(x.origin||'')}</span></div>`).join('') : '<div>本次没有匹配到附件</div>'}
+      ${files.length>30?`<div>… 其余 ${files.length-30} 个见导出目录 / ALL_FOR_AI.md 末尾清单</div>`:''}
+    </div>
+    <div class="missing"><b>附件未下载（合并转发里的图片：需点开卡片并查看原图/下载文件）</b>
+      ${miss.length? miss.slice(0,20).map((m,i)=>`<div>${i+1}. 消息 ${esc(String(m.local_id))} · ${esc(m.reason)}<br><span class="small">${esc(m.hint||'')}</span></div>`).join('') : '<div>无，附件齐全 ✅</div>'}
+      ${miss.length>20?`<div>… 其余 ${miss.length-20} 个见 ALL_FOR_AI.md</div>`:''}
+    </div>`;
+  S.lastOutDir=d.out_dir; $('#btnOpen').disabled=false;
+  setMsg('导出完成，可以打开 发给AI 目录 Ctrl+A 全选拖给 AI');
+}
+
+async function doExport(){
+  if(!S.selected) return;
+  const g=S.selected;
+  const ids=S.messages.filter(m=>S.selIds.has(m.id)).map(m=>m.id);
+  if(!ids.length){ setMsg('请先勾选消息',true); return; }
+  if(ids.length>1000 && !confirm('当前勾选了 '+ids.length+' 条消息，可能包含多个旧单子且导出耗时较长。\\n建议用「今天 / 近3天」或「从此条往后全选」缩小范围。确认仍要导出？')) return;
+  $('#btnExport').disabled=true;
+  $('#exportResult').innerHTML='<div class="hint">正在导出 '+ids.length+' 条消息并精准匹配附件…</div>';
+  try{
+    const t=await api('/api/export', {cid:g.id, account:g.account, name:g.name, ids});
+    await pollTask(t.task_id, renderExport);
+  }catch(e){ $('#exportResult').innerHTML='<div class="hint">导出失败：'+esc(e.message)+'</div>'; setMsg(e.message,true); }
+  finally{ updateSelStat(); }
+}
+
+async function doRescan(){
+  $('#btnRescan').disabled=true;
+  $('#taskLog').style.display='block'; $('#taskLog').textContent='正在扫描企业微信内存，请稍候…';
+  try{
+    const t=await api('/api/rescan', {});
+    await pollTask(t.task_id, async task=>{
+      if(task.status==='error'){ setMsg('重扫失败：'+(task.error||''), true); }
+      else{
+        const r=task.result||{};
+        setMsg('重扫完成'+(r.added&&r.added.length?('，新增 '+r.added.length+' 个账号'):''));
+        await loadAll();
+        if(S.selected) await loadMessages();
+      }
+      $('#btnRescan').disabled=false;
+    });
+  }catch(e){ setMsg(e.message,true); $('#btnRescan').disabled=false; }
+}
+
+async function syncToggle(){
+  try{
+    const r=await api('/api/sync-control', {enabled:!S.syncEnabled});
+    S.syncEnabled=r.enabled; renderSyncControls();
+    setMsg(r.enabled?'已开启每 5 分钟自动同步':'已停止自动同步');
+  }catch(e){ setMsg(e.message,true); }
+}
+function renderSyncControls(){
+  $('#btnSync').textContent = S.syncEnabled?'停止同步':'开启自动同步';
+  $('#btnSync').className = 'btn'+(S.syncEnabled?' danger':'');
+  $('#syncState').textContent = S.syncEnabled?'运行中（每 5 分钟）':'未开启';
+  $('#syncDot').className = 'dot '+(S.syncEnabled?'ok':'idle');
+}
+
+async function openFolder(){
+  if(!S.lastOutDir){ setMsg('请先导出',true); return; }
+  try{ await api('/api/open-folder',{path:S.lastOutDir}); setMsg('已打开 发给AI 目录'); }
+  catch(e){ setMsg(e.message,true); }
+}
+
+async function loadAll(){
+  try{
+    const st=await api('/api/status'); renderAccounts(st);
+    const cv=await api('/api/conversations'); S.groups=cv.conversations||[];
+    const w=await api('/api/watch'); S.watched=w.ids||[]; $('#watchCount').textContent=S.watched.length;
+    const ss=await api('/api/sync-status');
+    $('#lastSync').textContent=ss.last_sync||'尚未同步';
+    S.syncEnabled=!!ss.enabled; renderSyncControls();
+    renderGroups(); setMsg('已加载 '+S.groups.length+' 个会话');
+  }catch(e){ setMsg('加载失败：'+e.message, true); }
+}
+
+// 搜索即联动：300ms 防抖后自动高亮并选中第一条匹配结果，右侧立刻切换
+function onSearchInput(){
+  clearTimeout(S.searchTimer);
+  S.searchTimer=setTimeout(async ()=>{
+    const kw=($('#search').value||'').trim();
+    const list=filterGroups();
+    renderGroups();
+    if(kw && list.length) await selectGroup(list[0]);
+  },300);
+}
+
+$('#search').addEventListener('input', onSearchInput);
+$('#btnRescan').addEventListener('click', doRescan);
+$('#btnReload').addEventListener('click', async ()=>{ setMsg('正在刷新…'); try{ await api('/api/refresh',{}); await loadAll(); if(S.selected) await loadMessages(); }catch(e){setMsg(e.message,true);} });
+$('#btnExport').addEventListener('click', doExport);
+$('#btnOpen').addEventListener('click', openFolder);
+$('#btnSync').addEventListener('click', syncToggle);
+
+$$('.fbtn[data-range]').forEach(b=>b.addEventListener('click',()=>{
+  $$('.fbtn[data-range]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); S.range=b.dataset.range; loadMessages();
+}));
+$('#btnCustom').addEventListener('click',()=>{
+  if(!$('#dtStart').value && !$('#dtEnd').value){ setMsg('请先选择开始或结束时间',true); return; }
+  $$('.fbtn[data-range]').forEach(x=>x.classList.remove('on'));
+  S.range='custom'; loadMessages();
+});
+$('#btnAll').addEventListener('click',()=>{ S.selIds=new Set(S.messages.map(m=>m.id)); syncChecks(); updateSelStat(); });
+$('#btnInvert').addEventListener('click',()=>{
+  const next=new Set();
+  for(const m of S.messages) if(!S.selIds.has(m.id)) next.add(m.id);
+  S.selIds=next; syncChecks(); updateSelStat();
+});
+$('#btnNone').addEventListener('click',()=>{ S.selIds=new Set(); syncChecks(); updateSelStat(); });
+$('#btnMore').addEventListener('click',()=>renderMsgList(false));
+$('#msgList').addEventListener('change', e=>{
+  if(!e.target.classList.contains('mcheck')) return;
+  const id=e.target.dataset.id;
+  if(e.target.checked) S.selIds.add(id); else S.selIds.delete(id);
+  e.target.closest('.msg-item').classList.toggle('selmsg', e.target.checked);
+  updateSelStat();
+});
+$('#msgList').addEventListener('click', e=>{
+  const img=e.target.closest('.fwd-thumb');
+  if(img){ window.open(img.dataset.full, '_blank'); return; }
+  const btn=e.target.closest('[data-from]');
+  if(!btn) return;
+  const idx=S.messages.findIndex(m=>m.id===btn.dataset.from);
+  if(idx<0) return;
+  S.selIds=new Set(S.messages.slice(idx).map(m=>m.id));
+  syncChecks(); updateSelStat();
+  setMsg('已从第 '+(idx+1)+' 条选到最后，共 '+S.selIds.size+' 条（前面旧单子已跳过）');
+});
+setInterval(async ()=>{
+  try{ const r=await api('/api/logs?n=80'); const el=$('#logs'); el.textContent=(r.lines||[]).join('\n')||'暂无日志'; el.scrollTop=el.scrollHeight; }catch(e){}
+}, 3000);
+// 右侧聊天记录实时自动同步：每 8 秒静默检查 message.db / WAL 新写入
+setInterval(pollChanges, 8000);
+setTimeout(pollChanges, 2500);
+loadAll();
+</script>
+</body>
+</html>

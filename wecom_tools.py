@@ -458,7 +458,7 @@ DOC_EXTENSIONS = IMAGE_EXTENSIONS | {
     ".doc", ".docx", ".pdf", ".xls", ".xlsx", ".xlsm", ".csv", ".txt", ".md", ".json",
     ".log", ".xml", ".html", ".htm", ".ppt", ".pptx", ".rtf",
     ".dwg", ".dxf", ".skp", ".rvt", ".rfa", ".3ds", ".max", ".obj", ".stl", ".step", ".stp",
-    ".psd", ".ai", ".cdr", ".eps", ".svg", ".zip", ".rar", ".7z",
+    ".psd", ".ai", ".cdr", ".eps", ".svg", ".zip", ".rar", ".7z", ".lnk",
     ".mp4", ".mov", ".avi", ".mp3", ".wav", ".silk", ".amr", ".m4a",
 }
 MAX_CACHE_FILES = 200
@@ -945,7 +945,7 @@ def forward_thumb(acc, cid, mid, sub_i, file_i):
 
 ATTACHMENT_EXTS = (
     "docx", "doc", "pdf", "xlsx", "xls", "xlsm", "csv", "pptx", "ppt", "txt", "md",
-    "wps", "et", "dps", "zip", "rar", "7z", "dwg", "dxf", "rvt", "rfa", "skp", "obj",
+    "wps", "et", "dps", "zip", "rar", "7z", "lnk", "dwg", "dxf", "rvt", "rfa", "skp", "obj",
     "stp", "step", "stl", "fbx", "3ds", "3dm", "max", "igs", "iges", "sat", "sldprt",
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "psd", "ai", "svg",
     "mp4", "mov", "avi", "mp3", "wav", "amr", "silk", "m4a",

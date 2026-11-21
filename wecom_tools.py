@@ -23,6 +23,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+import zipfile
 from pathlib import Path
 
 try:
@@ -440,7 +442,8 @@ def _sync_locked(cfg, force=False):
             results.append({"conversation_id": cid, "skipped": True, "account": acc["id"], "name": name})
             continue
         try:
-            results.append(export_one(cfg, acc, cid, name))
+            all_ids = [m["id"] for m in _message_index(cfg, acc, cid)]
+            results.append(precise_export(cfg, acc, cid, name, all_ids, zip_mode="overwrite"))
         except Exception as exc:
             errors.append(f"{cid}: {exc}")
 
@@ -589,9 +592,9 @@ def _render(ct, raw):
 
 # ---------------------------------------------------------------- 合并转发卡片解析
 #
-# ct=4 的复合消息即合并转发卡片，标题常见两种形态：
-#   「<A>和<B>的聊天记录」/「Chat History for <A> and <B>」
-# 典型样本含十几到几十条子消息，文字与图片/文件混排。
+# 实测样本（protobuf 结构观察）：
+#   实测样本 A：ct=4 合并转发，21 条子消息 / 6 张图
+#   实测样本 B：ct=4 合并转发，15 条子消息
 # 结构：
 #   root.f2 标题；root.f1[] 子消息
 #   子消息 f2 时间(Unix 秒) / f5 类型(0,2=文本 14,101=图片 15=文件) / f11 发言人
@@ -600,11 +603,36 @@ def _render(ct, raw):
 #                f3/f26 下载 URL、f25 token、f44 扩展名
 # 关键实测：图片 f103.f10 恰好等于本机 Cache/Image 里对应 .jpg 的 MD5，
 #           6/6 精确命中，因此用「原始字节数 + MD5」做最强匹配键。
+#
+# 实测补充：合并转发可任意层套娃。第 1 层子消息
+# f107 里是完整的二级卡片 payload（同样的 f1[] 子消息 + f2 标题结构），
+# 二级卡片里还能再嵌三级。因此不再写死「f101/102/105/107 是文本、f103/104/106
+# 是媒体」，改为遍历子消息全部字段：长得像卡片的递归展开，长得像媒体的全收。
 
 _FWD_TEXT_FIELDS = (101, 102, 105, 107)
 _FWD_MEDIA_FIELDS = (103, 104, 106)
 _HASH32_RE = re.compile(r"[0-9a-fA-F]{32}")
-_NAME_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+# 任意后缀，不再使用 ATTACHMENT_EXTS 白名单（PDF/OBJ/STP/NC/RVT/C4D… 一律收）
+_NAME_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,12}$")
+_CARD_MIN_SUBS = 2
+_MAX_CARD_DEPTH = 8
+
+
+def _media_filename_ok(text):
+    """媒体 payload.f2 是否是真实文件名：有点后缀即可，不限制具体后缀。
+
+    uuid/hex 形式的缓存名（如 0123abcd-….jpg）也是企微真实文件名，必须收下。
+    """
+    if not text or len(text) > 180:
+        return False
+    if not _NAME_EXT_RE.search(text):
+        return False
+    stem = text.rsplit(".", 1)[0]
+    if re.fullmatch(r"[0-9a-fA-F]{32,}", stem):
+        return False
+    if re.fullmatch(r"https?://.*", text, re.I) or "/" in text or "\\" in text:
+        return False
+    return True
 
 
 def _pb_map(blob):
@@ -641,6 +669,9 @@ def _fwd_noise(text):
         return True
     if re.fullmatch(r"\d{10,25}(?:[;,]\s*\d{10,25}){2,}", text) or re.fullmatch(r"\d{10,}", text):
         return True
+    # 短数字是正常聊天正文（接单扣 1、报价 120 / 500），必须保留
+    if re.fullmatch(r"\d{1,6}", text):
+        return False
     if len(text) <= 5 and not re.search(r"[\u4e00-\u9fff]", text) and not _NAME_EXT_RE.search(text):
         return True
     return False
@@ -711,7 +742,12 @@ def _fwd_text(payload):
 
 
 def _fwd_media(blob, sub_ct=0):
-    """解析媒体 payload：原文件名 / 原始字节数 / hash / token / url。"""
+    """解析媒体 payload：原文件名 / 原始字节数 / 32 位 hash / token / url。
+
+    不再按 ATTACHMENT_EXTS 白名单判断「是不是文件」：只要有原始大小，且带
+    任意后缀的真实文件名或 32 位 hash，就一律收下，后续按 名字 →
+    (字节数 + MD5) 去 Cache/File、Image、Video、Voice 全盘精准匹配。
+    """
     payload = _pb_map(blob)
     if not payload:
         return None
@@ -719,13 +755,16 @@ def _fwd_media(blob, sub_ct=0):
     for number in (2, 44):
         for value in payload.get(number, []):
             text = _pb_str(value)
-            if text and _NAME_EXT_RE.search(text) and _valid_filename(text):
+            if _media_filename_ok(text):
                 original = _clean_filename(text)
                 break
         if original:
             break
     size = payload.get(4, [0])[0]
     size = int(size) if isinstance(size, int) else 0
+    if not size:
+        alt = payload.get(19, [0])[0]
+        size = int(alt) if isinstance(alt, int) else 0
     hashes = []
     for number in (8, 10, 30, 31):
         for value in payload.get(number, []):
@@ -743,69 +782,189 @@ def _fwd_media(blob, sub_ct=0):
                 break
         if url:
             break
-    if not (original or size or hashes or url):
+    # 必须是真媒体，避免把文本 / 卡片 payload 误判成附件
+    if not (size > 0 and (original or hashes)):
         return None
+    suffix = Path(original).suffix.lower() if original else ""
+    # 有名字的 .jpg/.png 也是图片，不能因为「有文件名」就当成普通文档
+    kind = "image" if (not original or suffix in IMAGE_EXTENSIONS) else "file"
     return {
-        "name": original, "named": bool(original), "kind": "file" if original else "image",
+        "name": original, "named": bool(original), "kind": kind,
         "size": size, "hashes": hashes, "token": token[:180], "url": url[:400],
         "source": None, "match": None, "placeholder": False, "thumb": False,
     }
 
 
-def parse_forward_card(ct, raw):
-    """识别 ct=4 的合并转发卡片，拆出全部子消息；不是卡片返回 None。"""
-    if int(ct or 0) != 4 or not raw or len(raw) < 400:
-        return None
+def _pb_first_int(fields, number, default=0):
+    value = fields.get(number, [None])[0]
+    return int(value) if isinstance(value, int) else default
+
+
+def _pb_first_text(fields, number):
+    for value in fields.get(number, []):
+        text = _pb_str(value)
+        if text:
+            return text
+    return ""
+
+
+def _is_card_payload(blob):
+    """卡片 payload：>=2 个 f1 子消息，且每个都带 f2(时间) / f5(类型)。"""
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) < 60:
+        return False
+    fields = _pb_map(blob)
+    subs = [v for v in fields.get(1, [])
+            if isinstance(v, (bytes, bytearray)) and len(v) > 12]
+    if len(subs) < _CARD_MIN_SUBS:
+        return False
+    score = 0
+    for sub in subs:
+        f = _pb_map(sub)
+        if 2 in f and 5 in f and isinstance(f[2][0], int) and isinstance(f[5][0], int):
+            score += 1
+    return score >= _CARD_MIN_SUBS
+
+
+def _sub_text(fields, skip_fields=(), allow_fallback=True):
+    segments = []
+    for number in _FWD_TEXT_FIELDS:
+        if number in skip_fields:
+            continue
+        for value in fields.get(number, []):
+            if isinstance(value, (bytes, bytearray)):
+                for line in _fwd_text(value).splitlines():
+                    if line.strip():
+                        segments.append(line.strip())
+    if not segments and allow_fallback:
+        # 少数卡片把正文放在非常规字段；此时才全字段兜底
+        for number in sorted(fields):
+            if number in skip_fields or number in _FWD_TEXT_FIELDS or number in (11, 6, 8, 12):
+                continue
+            for value in fields[number]:
+                if isinstance(value, (bytes, bytearray)) and 4 <= len(value) < 2000:
+                    for line in _fwd_text(value).splitlines():
+                        if line.strip():
+                            segments.append(line.strip())
+    return "\n".join(dict.fromkeys(segments))[:6000]
+
+
+def _sub_media(fields, skip_fields=()):
+    """遍历子消息全部字段收媒体 payload（不限后缀、不限字段号）。"""
+    out, seen = [], set()
+    for number in sorted(fields):
+        if number in skip_fields:
+            continue
+        for value in fields[number]:
+            if not isinstance(value, (bytes, bytearray)) or len(value) < 20:
+                continue
+            item = _fwd_media(value)
+            if not item:
+                continue
+            key = (item["size"], tuple(item["hashes"]), item["name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def _flatten_card(raw, depth, seen, fallback_ts):
+    """展开一层卡片；嵌套卡片在其父消息的【原位置】递归插入。"""
     root = _pb_map(raw)
-    subs_raw = [v for v in root.get(1, []) if isinstance(v, (bytes, bytearray))]
-    if len(subs_raw) < 2:
-        return None
-    title = next((t for t in (_pb_str(v) for v in root.get(2, [])) if t and not _fwd_noise(t)), "")
-    subs = []
+    subs_raw = [v for v in root.get(1, [])
+                if isinstance(v, (bytes, bytearray)) and len(v) > 8]
+    if not subs_raw:
+        return [], "", depth
+    title = ""
+    for number in (2, 3):
+        candidate = _pb_first_text(root, number)
+        if candidate and not _fwd_noise(candidate):
+            title = candidate
+            break
+    parsed = []
     for index, blob in enumerate(subs_raw):
         fields = _pb_map(blob)
         if not fields:
             continue
-        value = fields.get(2, [0])[0]
-        ts = float(value) if isinstance(value, int) and 1_400_000_000 < value < 2_600_000_000 else 0.0
+        raw_ts = _pb_first_int(fields, 2)
+        ts = float(raw_ts) if 1_400_000_000 < raw_ts < 2_600_000_000 else 0.0
+        sub_ct = _pb_first_int(fields, 5)
         sender = ""
         for number in (11, 6):
-            for item in fields.get(number, []):
-                candidate = _pb_str(item)
-                if candidate and not _fwd_noise(candidate):
-                    sender = candidate
-                    break
-            if sender:
+            candidate = _pb_first_text(fields, number)
+            if candidate and not _fwd_noise(candidate):
+                sender = candidate
                 break
-        sub_ct = fields.get(5, [0])[0]
-        sub_ct = int(sub_ct) if isinstance(sub_ct, int) else 0
-        texts = []
-        for number in _FWD_TEXT_FIELDS:
-            for value in fields.get(number, []):
-                if isinstance(value, (bytes, bytearray)):
-                    for segment in _fwd_text(value).splitlines():
-                        if segment:
-                            texts.append(segment)
-        text = "\n".join(dict.fromkeys(t for t in texts if t))[:6000]
-        media = []
-        for number in _FWD_MEDIA_FIELDS:
-            for value in fields.get(number, []):
-                item = _fwd_media(value, sub_ct)
-                if item:
-                    media.append(item)
-        if not (text or media):
+        nested = []
+        for number in sorted(fields):
+            for value in fields[number]:
+                if isinstance(value, (bytes, bytearray)) and _is_card_payload(value):
+                    digest = hashlib.md5(bytes(value)).hexdigest()
+                    if digest in seen:
+                        continue
+                    nested.append((number, value, digest))
+        skip = {n for n, _, _ in nested}
+        media = _sub_media(fields, skip)
+        text = _sub_text(fields, skip, allow_fallback=not (media or nested))
+        if not (text or media or nested):
             continue
-        kind = "文件" if any(m["kind"] == "file" for m in media) else ("图片" if media else "文字")
-        subs.append({
-            "idx": index, "ts": ts, "time": ex.fmt_time(ts) if ts else "",
+        if nested:
+            kind = "合并转发"
+        elif any(m["kind"] == "file" for m in media):
+            kind = "文件"
+        elif media:
+            kind = "图片"
+        else:
+            kind = "文字"
+        effective_ts = ts or fallback_ts
+        parsed.append((ts, index, {
+            "idx": index, "ts": effective_ts,
+            "time": ex.fmt_time(effective_ts) if effective_ts else "",
             "sender": sender or "未知", "ct": sub_ct, "kind": kind,
-            "text": text, "files": media,
-        })
-    if len(subs) < 2:
+            "text": text, "files": media, "depth": depth,
+            "is_card": bool(nested),
+            "card_title": title or "合并转发聊天记录",
+        }, nested))
+    # 每层内部按原始时间正序；ts=0（图文卡片子消息）保持 payload 原顺序
+    parsed.sort(key=lambda item: (item[0] or 0, item[1]))
+    flat, max_depth = [], depth
+    for ts, index, entry, nested in parsed:
+        flat.append(entry)
+        for number, value, digest in nested:
+            if depth >= _MAX_CARD_DEPTH:
+                continue
+            children, _, child_depth = _flatten_card(
+                value, depth + 1, seen | {digest}, entry["ts"] or fallback_ts)
+            for child in children:
+                child["parent_title"] = entry["card_title"]
+            flat.extend(children)
+            max_depth = max(max_depth, child_depth)
+    return flat, title, max_depth
+
+
+def parse_forward_card(ct, raw, fallback_ts=0.0):
+    """识别合并转发 / 图文混排卡片，并递归展开【任意层】嵌套。
+
+    返回平铺 subs（每条带 depth），调用方按 depth 生成 ### / #### 层级标题。
+    图文混排卡片（ct=123）同样适用：f1[] 里混排图片子消息与文字子消息。
+    """
+    if not raw or len(raw) < 60 or not _is_card_payload(raw):
         return None
-    subs.sort(key=lambda s: (s["ts"], s["idx"]))
-    return {"title": title or "合并转发聊天记录", "count": len(subs), "subs": subs,
-            "images": 0, "matched": 0, "missing": 0}
+    ct = int(ct or 0)
+    flat, title, levels = _flatten_card(raw, 1, set(), float(fallback_ts or 0))
+    if not flat:
+        return None
+    card_type = "图文混排卡片" if ct == 123 else "合并转发"
+    if not title:
+        title = "图文混排卡片" if ct == 123 else "合并转发聊天记录"
+    total_files = sum(len(s["files"]) for s in flat)
+    return {
+        "title": title, "card_type": card_type, "ct": ct,
+        "count": len(flat), "levels": levels, "subs": flat,
+        "total_files": total_files,
+        # images 保留为兼容字段，语义改为「附件总数」，消除统计口径矛盾
+        "images": total_files, "matched": 0, "missing": 0,
+    }
 
 
 def _image_suffix_of(path):
@@ -870,54 +1029,78 @@ def _cached_cache_index(acc, ttl=180):
     return index, count
 
 
-def resolve_forward_media(acc, card, card_ts, index=None):
-    """按 文件名 → (原始字节数 + MD5) → (字节数唯一 + 时间接近) 精准找本机缓存。
+def _match_media_item(item, index, msg_ts=0, card_ts=0):
+    """精准匹配单个媒体：原始字节数 + MD5 → 文件名(校验字节数) → 字节数唯一。
 
-    只在本账号 Cache 内找；无图片 magic 的全零占位文件视为「尚未下载」。
+    实测坑：图文卡片图片 f2 与缓存里的【缩略图】同名但字节数不同，
+    若先按名字命中会拿到缩略图。因此把 size+MD5 放在最前面。
+    """
+    size = item.get("size") or 0
+    hashes = item.get("hashes") or []
+    name = item.get("name") or ""
+    ts = msg_ts or card_ts
+    if size and hashes:
+        for candidate in index.get("by_size", {}).get(size, []):
+            if _md5_of(candidate[1]) in hashes:
+                return candidate[1], "size+md5"
+    name_hit = None
+    if name:
+        hit = _lookup_cache(index, name, ts)
+        if hit:
+            try:
+                hit_size = Path(hit).stat().st_size
+            except OSError:
+                hit_size = 0
+            if not size or hit_size == size:
+                return hit, "name"
+            name_hit = hit
+    if size:
+        candidates = list(index.get("by_size", {}).get(size, []))
+        if len(candidates) == 1:
+            return candidates[0][1], "size"
+    if name_hit:
+        return name_hit, "name-loose"
+    return None, None
+
+
+def resolve_forward_media(acc, card, card_ts, index=None):
+    """递归平铺后的所有层级附件统一找缓存，并把统计口径对齐。
+
+    保证 total_files == matched + missing，且 images 就是 total_files，
+    不再出现「含 0 张图片/文件，已精准匹配 1」这类矛盾。
     """
     if index is None:
         index, _ = _cached_cache_index(acc)
-    image_no = 0
+    image_no, total, matched, missing = 0, 0, 0, 0
     for sub in card["subs"]:
         for item in sub["files"]:
-            if item["kind"] == "image":
+            total += 1
+            if item["kind"] == "image" and not item.get("named"):
                 image_no += 1
                 item["name"] = item["name"] or f"参考图{image_no}.jpg"
-            source, how = None, None
-            if item.get("named"):
-                source = _lookup_cache(index, item["name"], sub["ts"] or card_ts)
-                how = "name" if source else None
-            if not source and item["size"]:
-                # 文件名没对上（缓存里可能存成 uuid 名）时，用原始字节数 + MD5 兜底
-                candidates = list(index.get("by_size", {}).get(item["size"], []))
-                if item["kind"] == "image":
-                    candidates = [c for c in candidates if _image_suffix_of(c[1])]
-                if item["hashes"]:
-                    for candidate in candidates:
-                        if _md5_of(candidate[1]) in item["hashes"]:
-                            source, how = candidate[1], "md5"
-                            break
-                elif len(candidates) == 1 and abs(
-                        candidates[0][0] - (card_ts or candidates[0][0])) < 7 * 86400:
-                    source, how = candidates[0][1], "size"
-            if source and item["kind"] == "image" and not _image_suffix_of(source):
-                # 只有「图片」才检查 magic：Word/PDF/工程文件本来就不是图片头
-                item["placeholder"] = True
-                source, how = None, None
-            if source and item["kind"] == "image":
+            source, how = _match_media_item(item, index, sub.get("ts") or 0, card_ts)
+            if source and item["kind"] == "image" and not item.get("named"):
                 ext = _image_suffix_of(source)
-                if not item.get("named"):
-                    item["name"] = f"参考图{image_no}{ext or '.jpg'}"
+                if ext:
+                    item["name"] = f"参考图{image_no}{ext}"
+            if source:
+                matched += 1
+                try:
+                    item["size_kb"] = round(Path(source).stat().st_size / 1024, 1)
+                except OSError:
+                    item["size_kb"] = 0
+            else:
+                missing += 1
+                item["size_kb"] = 0
+            is_image = bool(source and _image_suffix_of(source))
             item["source"] = str(source) if source else None
             item["match"] = how
-            item["thumb"] = bool(source and item["kind"] == "image")
-            item["size_kb"] = round(Path(source).stat().st_size / 1024, 1) if source else 0
-            if item["kind"] == "image":
-                card["images"] += 1
-            if source:
-                card["matched"] += 1
-            else:
-                card["missing"] += 1
+            item["thumb"] = is_image
+            item["placeholder"] = False
+    card["total_files"] = total
+    card["images"] = total
+    card["matched"] = matched
+    card["missing"] = missing
     return card
 
 
@@ -950,7 +1133,9 @@ ATTACHMENT_EXTS = (
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "psd", "ai", "svg",
     "mp4", "mov", "avi", "mp3", "wav", "amr", "silk", "m4a",
 )
-_EXT_ALT = "|".join(re.escape(e) for e in ATTACHMENT_EXTS)
+# 取消后缀白名单：任意 1~12 位字母数字后缀都视为真实文件名
+# （PDF/DOC/XLS/PPT/WPS/OBJ/STL/STP/NC/RVT/SKP/C4D/PSD/AI/7Z… 一律识别）
+_EXT_ALT = r"[A-Za-z0-9]{1,12}"
 _NOISE_URL_RE = re.compile(r"https?://[^\s\u4e00-\u9fff]+", re.I)
 _NOISE_LINE_PATTERNS = [
     re.compile(r"^\d{15,20}$"),                       # 企微内部 15~20 位数字 ID
@@ -1039,20 +1224,56 @@ def clean_message(ct, raw):
         # 独立的英文账号/ID 行（合并转发里的 wxid），不是正文
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{7,23}", line):
             continue
-        if (len(line) <= 6 and not re.search(r"[\u4e00-\u9fff]", line)
+        # 短数字正文（1 / 120 / 500 / 报价）必须保留；只丢弃短乱码
+        if (not re.fullmatch(r"\d{1,6}", line)
+                and len(line) <= 6 and not re.search(r"[\u4e00-\u9fff]", line)
                 and not _FILE_LINE_RE.fullmatch(line)):
-            continue  # 'Rígr' / '1' / ']' / 短乱码
+            continue  # 'Rígr' / ']' / 短乱码
         names, rest = _extract_filenames(line)
         for name in names:
             if name and name not in files:
                 files.append(name)
         rest = re.sub(r"\s{2,}", " ", rest).strip(
             " \t-—·|[]【】<>《》\"'“”‘’,，;；:：")
+        keep_short = bool(re.fullmatch(r"\d{1,6}", rest))
         if (rest and rest not in seen
-                and not (len(rest) <= 3 and not re.search(r"[\u4e00-\u9fff]", rest))):
+                and (keep_short or not (len(rest) <= 3 and not re.search(r"[\u4e00-\u9fff]", rest)))):
             seen.add(rest)
             body_lines.append(rest)
     return "\n".join(body_lines).strip(), files
+
+
+def extract_message_media(ct, raw):
+    """非卡片消息：递归扫 protobuf，把所有媒体 payload 找出来（不限字段 / 后缀）。
+
+    企业微信把图片/文件/视频/语音 payload 藏在 f103/f104/f106 或更深层；
+    这里不再依赖清洗后文本里的文件名白名单，直接从原始字节里取
+    真实文件名 + 原始字节数 + 32 位 hash。
+    """
+    if not raw:
+        return []
+    found, seen = [], set()
+
+    def walk(blob, depth):
+        if (depth > 7 or not isinstance(blob, (bytes, bytearray))
+                or len(blob) > 2_000_000):
+            return
+        fields = _pb_map(blob)
+        if not fields:
+            return
+        item = _fwd_media(blob)
+        if item:
+            key = (item["size"], tuple(item["hashes"]), item["name"])
+            if key not in seen:
+                seen.add(key)
+                found.append(item)
+        for number in sorted(fields):
+            for value in fields[number]:
+                if isinstance(value, (bytes, bytearray)) and len(value) > 20:
+                    walk(value, depth + 1)
+
+    walk(raw, 0)
+    return found
 
 
 _MSG_INDEX = {}
@@ -1069,26 +1290,41 @@ def _message_index(cfg, acc, cid):
         if hit and hit[0] == stamp:
             return hit[1]
     rows, users = _rows(acc, cfg, cid)
+    index, _ = _cached_cache_index(acc)
     messages = []
     for mid, sid, ct, st, raw in rows:
-        card = parse_forward_card(ct, raw)
+        ts = _norm_ts(st)
+        card = parse_forward_card(ct, raw, ts)
         if card:
-            resolve_forward_media(acc, card, _norm_ts(st))
-            body = (f"【合并转发聊天记录】{card['title']} · {card['count']} 条子消息"
-                    f"（含 {card['images']} 张图片/文件，已匹配 {card['matched']} 个）")
+            resolve_forward_media(acc, card, ts, index)
+            body = (f"【{card['card_type']}】{card['title']} · {card['count']} 条子消息"
+                    f" / {card['levels']} 层 / {card['total_files']} 个附件"
+                    f"（已精准匹配 {card['matched']} 个，未缓存 {card['missing']} 个）")
             files = [f["name"] for sub in card["subs"] for f in sub["files"] if f["name"]]
             messages.append({
-                "id": str(mid), "ts": _norm_ts(st), "time": ex.fmt_time(st),
+                "id": str(mid), "ts": ts, "time": ex.fmt_time(st),
                 "sender": users.get(str(sid), str(sid)),
-                "type": "合并转发", "content": body, "files": files, "forward": card,
+                "type": card["card_type"], "content": body, "files": files, "forward": card,
             })
             continue
         body, files = clean_message(ct, raw)
+        media = extract_message_media(ct, raw)
+        for item in media:
+            source, how = _match_media_item(item, index, ts, ts)
+            item["source"] = str(source) if source else None
+            item["match"] = how
+            try:
+                item["size_kb"] = round(Path(source).stat().st_size / 1024, 1) if source else 0
+            except OSError:
+                item["size_kb"] = 0
+            item["thumb"] = bool(source and _image_suffix_of(source))
+            if item["name"] and item["name"] not in files:
+                files.append(item["name"])
         messages.append({
-            "id": str(mid), "ts": _norm_ts(st), "time": ex.fmt_time(st),
+            "id": str(mid), "ts": ts, "time": ex.fmt_time(st),
             "sender": users.get(str(sid), str(sid)),
             "type": ex.type_name(ct, "windows"),
-            "content": body, "files": files,
+            "content": body, "files": files, "media": media,
         })
     with _MSG_INDEX_LOCK:
         _MSG_INDEX.clear()  # 只保留最近一个会话，避免内存膨胀
@@ -1110,11 +1346,16 @@ def _public_forward(card):
         subs.append({
             "idx": sub["idx"], "ts": sub["ts"], "time": sub["time"],
             "sender": sub["sender"], "kind": sub["kind"], "text": sub["text"],
+            "depth": sub.get("depth", 1), "is_card": sub.get("is_card", False),
+            "card_title": sub.get("card_title", ""),
             "files": [{"name": f["name"], "kind": f["kind"], "size": f["size"],
                        "thumb": f.get("thumb", False), "match": f.get("match"),
                        "size_kb": f.get("size_kb", 0)} for f in sub["files"]],
         })
-    return {"title": card["title"], "count": card["count"], "images": card["images"],
+    total = card["total_files"]
+    return {"title": card["title"], "card_type": card.get("card_type", "合并转发"),
+            "count": card["count"], "levels": card.get("levels", 1),
+            "images": total, "total_files": total,
             "matched": card["matched"], "missing": card["missing"], "subs": subs}
 
 
@@ -1260,6 +1501,18 @@ def extract_document_text(path, limit=20000):
                 from pypdf import PdfReader
                 reader = PdfReader(str(path))
                 return "\n".join((page.extract_text() or "") for page in reader.pages[:30])[:limit]
+        if suffix == ".pptx":
+            try:
+                from pptx import Presentation
+            except ImportError:
+                return None  # 未装 python-pptx：保留原格式文件，不当作解析失败
+            pres = Presentation(str(path))
+            parts = []
+            for slide in list(pres.slides)[:60]:
+                for shape in slide.shapes:
+                    if getattr(shape, "has_text_frame", False):
+                        parts.append(shape.text_frame.text)
+            return "\n".join(parts)[:limit]
     except Exception as exc:
         return f"(文档解析失败: {exc})"
     return None
@@ -1502,17 +1755,11 @@ def cache_filtered(cfg, acc, cid, name=None):
 
 
 def web_export(cfg, acc, cid, name=None, cache_fallback=False):
-    """界面「一键导出给 AI」：聊天 + 媒体清单 + 附件 + 单文件汇总（可选兜底缓存）。
-
-    整段放在互斥锁里，保证 5 分钟同步线程不会在「导出聊天」与「生成 ALL_FOR_AI.md」
-    之间插进来覆盖 chat.media.json。
-    """
-    with db_lock():
-        summary = export_one(cfg, acc, cid, name)
-        # 先拷兜底缓存，再生成单文件，这样缓存文档正文也能写进 ALL_FOR_AI.md
-        fallback = cache_filtered(cfg, acc, cid, name) if cache_fallback else None
-        ai = build_all_for_ai(cfg, acc, cid, name, include_cache=bool(cache_fallback))
-        return {**summary, "all_for_ai": ai, "cache_fallback": fallback}
+    """Compatibility wrapper: all messages of this conversation -> one ZIP."""
+    all_ids = [m["id"] for m in _message_index(cfg, acc, cid)]
+    result = precise_export(cfg, acc, cid, name, all_ids, zip_mode="timestamp")
+    result["cache_fallback"] = None
+    return result
 
 
 CACHE_SUBDIRS = ("File", "Image", "Voice", "Video", "Emotion", "Files", "Images")
@@ -1574,6 +1821,245 @@ def _lookup_cache(index, filename, msg_ts):
     return nearest(index["stem"].get(_norm_filename(Path(filename).stem)))
 
 
+TMP_EXPORT_ROOT = RUNTIME / "tmp_export"
+
+
+def _cleanup_stale_tmp_exports(max_age_seconds=86400):
+    """Remove abandoned temp export directories older than one day."""
+    if not TMP_EXPORT_ROOT.exists():
+        return 0
+    now = time.time()
+    removed = 0
+    for child in TMP_EXPORT_ROOT.iterdir():
+        try:
+            if child.is_dir() and now - child.stat().st_mtime > max_age_seconds:
+                shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def _new_tmp_export_dir():
+    _cleanup_stale_tmp_exports()
+    TMP_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    name = "export_{}_{}_{}".format(
+        time.strftime("%Y%m%d-%H%M%S"), os.getpid(), uuid.uuid4().hex[:8]
+    )
+    path = TMP_EXPORT_ROOT / name
+    path.mkdir(parents=True, exist_ok=False)
+    return path
+
+
+def _export_zip_name(name, zip_mode="timestamp"):
+    base = safe_name(name or "未命名会话")
+    if zip_mode == "overwrite":
+        return f"{base}.zip"
+    if zip_mode != "timestamp":
+        raise RuntimeError(f"不支持的 ZIP 命名模式: {zip_mode}")
+    return f"{time.strftime('%Y%m%d-%H%M%S')}_{base}.zip"
+
+
+def _unique_export_zip_path(export_root, filename, zip_mode):
+    path = Path(export_root) / filename
+    if zip_mode == "overwrite" or not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    index = 2
+    while True:
+        candidate = path.with_name(f"{stem}_{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _zip_export_files(zip_temp, entries):
+    """Write entries in the exact order given; Unicode names get the UTF-8 flag."""
+    with zipfile.ZipFile(zip_temp, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for arcname, source in entries:
+            zf.write(source, arcname)
+    return [arcname for arcname, _ in entries]
+
+
+def _resolve_export_path(path):
+    cfg = load_config()
+    root = Path(cfg["export_root"]).resolve()
+    target = Path(path).resolve()
+    if target != root and root not in target.parents:
+        raise RuntimeError(f"拒绝访问导出根目录之外的路径: {target}")
+    return root, target
+
+
+def resolve_export_zip(path):
+    """Validate that a download/open request points to a .zip inside export_root."""
+    _, target = _resolve_export_path(path)
+    if not target.is_file():
+        raise RuntimeError(f"ZIP 文件不存在: {target}")
+    if target.suffix.lower() != ".zip":
+        raise RuntimeError(f"只允许下载 .zip 文件: {target}")
+    return target
+
+
+def _launch_explorer(target, select=False):
+    """Use ShellExecuteW so Chinese paths with spaces work without cmd shell quoting."""
+    import ctypes
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell_execute = shell32.ShellExecuteW
+    shell_execute.restype = ctypes.c_void_p
+    shell_execute.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
+        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int,
+    ]
+    params = f'/select,"{target}"' if select else f'"{target}"'
+    result = shell_execute(None, "open", "explorer.exe", params, None, 1)
+    if int(result or 0) <= 32:
+        # Fallback for unusual shell configurations.
+        subprocess.Popen(
+            ["explorer.exe", f"/select,{target}" if select else str(target)],
+            close_fds=True,
+        )
+
+
+def _find_explorer_hwnd_by_selection(target, timeout=6.0):
+    """Find the Explorer window whose selected item is exactly this file."""
+    try:
+        import win32com.client
+        import win32gui
+    except Exception:
+        return None
+    shell = win32com.client.Dispatch("Shell.Application")
+    needle = str(target).casefold()
+    fallback = None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            for window in shell.Windows():
+                try:
+                    if "explorer.exe" not in str(window.FullName).lower():
+                        continue
+                    hwnd = int(window.HWND)
+                    if not hwnd or not win32gui.IsWindow(hwnd):
+                        continue
+                    if fallback is None:
+                        fallback = hwnd
+                    selected = window.Document.SelectedItems()
+                    for item in selected:
+                        if str(item.Path).casefold() == needle:
+                            return hwnd
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return fallback
+
+
+def _find_explorer_hwnd_by_title(target, timeout=2.0):
+    try:
+        import win32gui
+    except Exception:
+        return None
+    needles = [str(target.name), str(target.parent.name)]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        found = []
+
+        def callback(hwnd, _unused):
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                if win32gui.GetClassName(hwnd) not in ("CabinetWClass", "ExploreWClass"):
+                    return True
+                title = win32gui.GetWindowText(hwnd)
+                if any(needle and needle in title for needle in needles):
+                    found.insert(0, hwnd)
+                else:
+                    found.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
+        if found:
+            return found[0]
+        time.sleep(0.2)
+    return None
+
+
+def _force_foreground(hwnd):
+    """Restore, topmost-toggle and foreground an Explorer window."""
+    try:
+        import win32gui
+        import win32con
+        import win32process
+        import win32api
+        import win32com.client
+    except Exception as exc:
+        return {"ok": False, "reason": f"窗口 API 不可用: {exc}"}
+    try:
+        foreground_before = win32gui.GetForegroundWindow()
+        fg_tid, _ = win32process.GetWindowThreadProcessId(foreground_before)
+        target_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+        attached = False
+        if fg_tid and target_tid and fg_tid != target_tid:
+            try:
+                win32process.AttachThreadInput(fg_tid, target_tid, True)
+                attached = True
+            except Exception:
+                pass
+        reassert = 0
+        held_ms = 0
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+            win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+            flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+            # 只做一次 TOPMOST 切换时，窗口常被 IDE / 浏览器立刻盖到底层。
+            # 这里保持置顶约 1.8 秒，期间若前台被抢走就再次夺回。
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+            hold_start = time.time()
+            while time.time() - hold_start < 1.8:
+                if win32gui.GetForegroundWindow() != hwnd:
+                    try:
+                        win32gui.SetForegroundWindow(hwnd)
+                        reassert += 1
+                    except Exception:
+                        pass
+                time.sleep(0.2)
+            held_ms = int((time.time() - hold_start) * 1000)
+            win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+            try:
+                app = win32com.client.Dispatch("WScript.Shell")
+                app.AppActivate(win32gui.GetWindowText(hwnd))
+            except Exception:
+                pass
+        finally:
+            if attached:
+                try:
+                    win32process.AttachThreadInput(fg_tid, target_tid, False)
+                except Exception:
+                    pass
+        time.sleep(0.2)
+        foreground_after = win32gui.GetForegroundWindow()
+        return {
+            "ok": foreground_after == hwnd,
+            "hwnd": hwnd,
+            "foreground_hwnd": foreground_after,
+            "title": win32gui.GetWindowText(hwnd),
+            "class": win32gui.GetClassName(hwnd),
+            "held_topmost_ms": held_ms,
+            "reassert_count": reassert,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
 def _reset_ai_dir(folder, export_root):
     """导出前清空该会话的 发给AI/ 目录（只动工具自有目录，严格校验路径）。"""
     root = Path(export_root).resolve()
@@ -1592,15 +2078,15 @@ def _reset_ai_dir(folder, export_root):
     folder.mkdir(parents=True, exist_ok=True)
 
 
-def precise_export(cfg, acc, cid, name=None, ids=None):
-    """只导出已勾选消息 + 精准匹配到的本群附件，严格按聊天顺序编号。
+def precise_export(cfg, acc, cid, name=None, ids=None, zip_mode="timestamp"):
+    """Export selected messages + exact attachments as ONE .zip in export_root.
 
-    输出目录：<导出根>/<群名>/发给AI/
-        000_chat.md          时间正序聊天；合并转发卡片在原位置完整展开子消息
-        001_MMDD-HHMM_xxx    按聊天出现顺序重命名的附件（含卡片内图片/文件）
-        ALL_FOR_AI.md        单文件汇总，按 001/002 顺序嵌入文档正文
-    不再盲捞全账号缓存，也不会混入其它群或旧单子的文件。
+    The temporary work directory lives under runtime/tmp_export and is always
+    removed. No per-conversation directory is created in the export root.
+    ZIP entry order: 000_chat.md, 001_..., 002_..., ..., ALL_FOR_AI.md.
     """
+    if zip_mode not in ("timestamp", "overwrite"):
+        raise RuntimeError(f"不支持的 ZIP 命名模式: {zip_mode}")
     wanted = {str(x) for x in (ids or [])}
     if not wanted:
         raise RuntimeError("没有勾选任何消息，请先在右侧列表里选择")
@@ -1610,8 +2096,10 @@ def precise_export(cfg, acc, cid, name=None, ids=None):
         raise RuntimeError("勾选的消息不在该会话中，请刷新右侧列表后重试")
     picked.sort(key=lambda m: (m["ts"], int(m["id"]) if m["id"].isdigit() else 0))
 
-    folder = Path(cfg["export_root"]) / safe_name(name or cid) / "发给AI"
-    _reset_ai_dir(folder, cfg["export_root"])
+    export_root = Path(cfg["export_root"]).resolve()
+    export_root.mkdir(parents=True, exist_ok=True)
+    tmp_dir = _new_tmp_export_dir()
+    folder = tmp_dir
     index, cache_count = build_cache_index(acc)
 
     title = name or str(cid)
@@ -1620,14 +2108,18 @@ def precise_export(cfg, acc, cid, name=None, ids=None):
         f"- conversation-id: `{cid}`", f"- 企微账号: `{acc['id']}`",
         f"- 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 已选消息: {len(picked)} 条（仅当前勾选，不含未勾选消息与其它群文件）",
-        "- 合并转发卡片已在该消息原位置按子消息原始时间正序完整展开，附件统一编号。", "",
+        "- 导出产物：单个 ZIP 压缩包；包内文件按聊天出现顺序排列。",
+        "- 合并转发卡片已在原位置递归展开【任意层嵌套】，层级用 ### / #### 标题区分。",
+        "- 各层文字、图片、文件按原始时间正序展示；所有附件统一编入全局 001、002… 序列。",
+        "- 附件不限格式：可转文本的就地展开正文，其余保留原格式文件并原位标注。", "",
         "---", "",
     ]
     ai_lines = [
         f"# {title} · 单文件汇总（给 AI）", "",
         f"- conversation-id: `{cid}` / 账号 `{acc['id']}`",
         f"- 已选消息 {len(picked)} 条，附件按聊天出现顺序编号 001、002…",
-        "- 只含当前勾选消息与这些消息精准匹配到的附件；Word/PDF/Excel/TXT 正文就地展开。", "",
+        "- 只含当前勾选消息与这些消息精准匹配到的附件；Word/PDF/Excel/TXT 正文就地展开。",
+        "- 本文件与 000_chat.md、编号附件一起打包在同一个 ZIP 里。", "",
         "---", "",
     ]
     file_map, attachments, missing = {}, [], []
@@ -1640,17 +2132,18 @@ def precise_export(cfg, acc, cid, name=None, ids=None):
                         forward=False, require_image=False, origin=""):
         """统一编号：主群消息与合并转发子消息共用同一个 001、002… 序列。"""
         nonlocal seq, chat_lines, ai_lines
-        if key in file_map:  # 同一文件多次提及时复用同一个编号
+        if key in file_map:
             note = file_map[key]
             chat_lines += [note, ""]
             ai_lines += [note, ""]
             return
         if source is not None:
             source = Path(source)
-            if not source.is_file() or (require_image and not _image_suffix_of(source)):
+            # 不再按「必须是图片头」过滤：任意格式（OBJ/STP/NC/RVT/压缩包/视频…）
+            # 只要缓存文件真实存在就按原格式打包
+            if not source.is_file():
                 source = None
         if source is None:
-            # 未下载的文件不占编号，保证 001/002/003 在目录里连续
             note = f"[附件未下载: {filename}]"
             missing.append({
                 "category": "missing", "status": "not_downloaded", "reason": filename,
@@ -1678,7 +2171,7 @@ def precise_export(cfg, acc, cid, name=None, ids=None):
         ai_lines += [note, ""]
         text = (extract_document_text(destination, limit=20000)
                 if suffix in (".txt", ".md", ".csv", ".json", ".log", ".xml", ".html", ".htm",
-                              ".docx", ".xlsx", ".xlsm", ".pdf") else None)
+                              ".docx", ".xlsx", ".xlsm", ".pdf", ".pptx", ".rtf") else None)
         if text is not None:
             stats["documents"] += 1
             ai_lines += [f"**附件 {number} 正文 · `{dest_name}`**", "", "```text", text, "```", ""]
@@ -1687,44 +2180,72 @@ def precise_export(cfg, acc, cid, name=None, ids=None):
             ai_lines += [f"![附件 {number}]({dest_name})", ""]
         else:
             stats["other_files"] += 1
-            ai_lines += [f"- 附件 {number}：`[{dest_name}]({dest_name})`", ""]
+            ai_lines += [f"- 附件 {number}：`{dest_name}`（原格式文件，保留在 ZIP 中）", ""]
         file_map[key] = note
 
     for message in picked:
         stats["messages"] += 1
         card = message.get("forward")
         if card:
-            # ---- 合并转发：在卡片原位置按子消息时间正序完整展开 ----
             stats["forward_cards"] += 1
-            header = f"## [{message['time']}] {message['sender']} · [合并转发]"
-            intro = (f"**{card['title']}** · {card['count']} 条子消息"
-                     f"（以下按子消息原始时间正序完整展开，图片/文件统一编号）")
-            chat_lines += [header, "", intro, "", "---", ""]
-            ai_lines += [header, "", intro, "", "---", ""]
+            card_type = card.get("card_type", "合并转发")
+            header = f"## [{message['time']}] {message['sender']} · [{card_type}]"
+            intro = (f"**{card['title']}** · {card['count']} 条（含各层转发卡片）/ "
+                     f"{card.get('levels', 1)} 层嵌套 / {card['total_files']} 个附件"
+                     f"（已精准匹配 {card['matched']} 个，未缓存 {card['missing']} 个）")
+            note = "以下按各层子消息原始时间正序递归展开，全部附件统一编入全局 001、002… 序列"
+            chat_lines += [header, "", intro, "", note, "", "---", ""]
+            ai_lines += [header, "", intro, "", note, "", "---", ""]
             for si, sub in enumerate(card["subs"]):
                 stats["forward_subs"] += 1
-                sub_header = f"### [{sub['time']}] {sub['sender']} · [{sub['kind']}]"
-                body = sub["text"] or "（此条为图片/文件，无文字正文）"
+                depth = min(int(sub.get("depth", 1)), 6)
+                hashes = "#" * (2 + depth)
+                layer = f"第{depth}层转发"
+                sub_header = (f"{hashes} [{layer}] [{sub['time']}] "
+                              f"{sub['sender']} · [{sub['kind']}]")
+                if sub.get("is_card"):
+                    body = (f"**{sub.get('card_title') or '合并转发聊天记录'}** · "
+                            "以下为该层展开的子消息（按原始时间正序）")
+                else:
+                    body = sub["text"] or "（此条为图片/文件，无文字正文）"
                 chat_lines += [sub_header, "", body, ""]
                 ai_lines += [sub_header, "", body, ""]
                 for fi, item in enumerate(sub["files"]):
-                    filename = item["name"]
+                    source = item.get("source")
+                    filename = (item["name"] or (Path(source).name if source
+                                                 else f"附件_{item.get('size', 0)}"))
                     key = (_norm_filename(filename) if item.get("named")
-                           else f"{message['id']}|{si}|{fi}|{_norm_filename(filename)}")
+                           else f"{message['id']}|{si}|{fi}|{item.get('size', 0)}|"
+                                 f"{','.join(item.get('hashes', [])[:1])}")
                     emit_attachment(
-                        filename, item.get("source"), sub["ts"], sub["time"], key,
+                        filename, source, sub["ts"], sub["time"], key,
                         f"{message['id']}#{si + 1}", forward=True,
-                        require_image=(item["kind"] == "image"),
-                        origin=f"合并转发 · {card['title']}")
+                        origin=f"{card_type} · 第{depth}层 · {card['title']}")
             chat_lines += ["---", ""]
             ai_lines += ["---", ""]
             continue
 
-        # ---- 普通主群消息 ----
         header = f"## [{message['time']}] {message['sender']} · [{message['type']}]"
         chat_lines += [header, "", message["content"], ""]
         ai_lines += [f"## [{message['time']}] {message['sender']}", "", message["content"], ""]
+        emitted_keys = set()
+        # 1) 直接从 protobuf 媒体 payload 精准匹配到的附件（不限格式/后缀）
+        for mi, item in enumerate(message.get("media", [])):
+            source = item.get("source")
+            filename = (Path(source).name if source else
+                        (item["name"] or f"附件_{item.get('size', 0)}"))
+            key = (_norm_filename(filename) if item.get("named")
+                   else f"{message['id']}|media|{mi}|{item.get('size', 0)}")
+            emit_attachment(filename, source, message["ts"], message["time"], key,
+                            message["id"], origin="主聊天")
+            emitted_keys.add(_norm_filename(filename))
+            if item.get("name"):
+                emitted_keys.add(_norm_filename(item["name"]))
+        # 2) 正文里提到的文件名兜底（去重，避免同一附件编号两次）
         for idx, filename in enumerate(message["files"]):
+            if _norm_filename(filename) in emitted_keys:
+                continue
+            emitted_keys.add(_norm_filename(filename))
             emit_attachment(filename, _lookup_cache(index, filename, message["ts"]),
                             message["ts"], message["time"], _norm_filename(filename),
                             message["id"])
@@ -1746,13 +2267,50 @@ def precise_export(cfg, acc, cid, name=None, ids=None):
     ai_path = folder / "ALL_FOR_AI.md"
     chat_path.write_text("\n".join(chat_lines), encoding="utf-8")
     ai_path.write_text("\n".join(ai_lines), encoding="utf-8")
+    ai_size_kb = round(ai_path.stat().st_size / 1024, 1)
+
+    zip_filename = _export_zip_name(title, zip_mode)
+    zip_path = _unique_export_zip_path(export_root, zip_filename, zip_mode)
+    zip_temp = tmp_dir / "export.zip"
+    zip_entries = [("000_chat.md", chat_path)]
+    zip_entries += [(item["renamed"], folder / item["renamed"]) for item in attachments]
+    zip_entries.append(("ALL_FOR_AI.md", ai_path))
+    zip_entry_names = _zip_export_files(zip_temp, zip_entries)
+
+    try:
+        os.replace(zip_temp, zip_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
     return {
         "account": acc["id"], "conversation_id": str(cid), "name": title,
-        "out_dir": str(folder), "chat_md": str(chat_path),
+        "export_root": str(export_root), "out_dir": str(export_root),
+        "zip_path": str(zip_path), "zip_name": zip_path.name,
+        "zip_mode": zip_mode, "zip_entries": zip_entry_names,
+        "zip_size_kb": round(zip_path.stat().st_size / 1024, 1),
+        "chat_md": f"{zip_path}#000_chat.md", "chat_md_name": "000_chat.md",
         "messages": len(picked), "attachments_ok": len(attachments),
         "files": attachments, "missing": missing,
         "cache_files_scanned": cache_count,
-        "all_for_ai": {"path": str(ai_path), "size_kb": round(ai_path.stat().st_size / 1024, 1), **stats},
+        "all_for_ai": {
+            "path": f"{zip_path}#ALL_FOR_AI.md", "name": "ALL_FOR_AI.md",
+            "size_kb": ai_size_kb, **stats,
+        },
+        # 统计一致性自检：顶部统计 / 子项状态 / 实际打包数三者必须相等
+        "counts": {
+            "attachments": len(attachments),
+            "classified": stats["documents"] + stats["images"] + stats["other_files"],
+            "missing": len(missing),
+            "forward_cards": stats["forward_cards"],
+            "forward_subs": stats["forward_subs"],
+            "card_total_files": sum(c["total_files"] for m in picked
+                                    if (c := m.get("forward"))),
+            "card_matched": sum(c["matched"] for m in picked
+                                if (c := m.get("forward"))),
+            "card_missing": sum(c["missing"] for m in picked
+                                if (c := m.get("forward"))),
+        },
+        "temp_dir": str(tmp_dir), "temp_dir_cleaned": not tmp_dir.exists(),
         "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -2037,11 +2595,30 @@ def rescan():
 
 
 def open_folder(path):
-    target = Path(path)
+    """Open Explorer on a directory, or select a ZIP and force it to the front."""
+    _, target = _resolve_export_path(path)
     if not target.exists():
-        raise RuntimeError(f"目录不存在: {target}")
-    os.startfile(str(target))
-    return {"opened": str(target)}
+        raise RuntimeError(f"路径不存在: {target}")
+
+    if target.is_file():
+        if target.suffix.lower() != ".zip":
+            raise RuntimeError(f"只允许定位 .zip 文件: {target}")
+        _launch_explorer(target, select=True)
+        hwnd = (_find_explorer_hwnd_by_selection(target, timeout=6.0)
+                or _find_explorer_hwnd_by_title(target, timeout=2.0))
+        foreground = _force_foreground(hwnd) if hwnd else {"ok": False, "reason": "未找到资源管理器窗口"}
+        return {
+            "opened": str(target.parent), "selected": str(target),
+            "foreground": bool(foreground.get("ok")), "foreground_detail": foreground,
+        }
+
+    _launch_explorer(target, select=False)
+    hwnd = _find_explorer_hwnd_by_title(target, timeout=4.0)
+    foreground = _force_foreground(hwnd) if hwnd else {"ok": False, "reason": "未找到资源管理器窗口"}
+    return {
+        "opened": str(target), "selected": None,
+        "foreground": bool(foreground.get("ok")), "foreground_detail": foreground,
+    }
 
 
 # ---------------------------------------------------------------- CLI
@@ -2054,6 +2631,7 @@ def main():
     p_match = sub.add_parser("match"); p_match.add_argument("keyword"); p_match.add_argument("--force", action="store_true")
     p_export = sub.add_parser("export"); p_export.add_argument("--cid", required=True)
     p_export.add_argument("--account"); p_export.add_argument("--name")
+    p_export.add_argument("--zip-mode", choices=("timestamp", "overwrite"), default="timestamp")
     p_sync = sub.add_parser("sync"); p_sync.add_argument("--force", action="store_true")
     p_cache = sub.add_parser("cache"); p_cache.add_argument("--cid", required=True)
     p_cache.add_argument("--account"); p_cache.add_argument("--name")
@@ -2078,6 +2656,7 @@ def main():
     p_msgs.add_argument("--start"); p_msgs.add_argument("--end")
     p_pe = sub.add_parser("precise-export"); p_pe.add_argument("--cid", required=True)
     p_pe.add_argument("--account"); p_pe.add_argument("--name"); p_pe.add_argument("--ids", required=True)
+    p_pe.add_argument("--zip-mode", choices=("timestamp", "overwrite"), default="timestamp")
     args = parser.parse_args()
     cfg = load_config()
 
@@ -2099,7 +2678,9 @@ def main():
                 raise RuntimeError(f"找不到会话 {args.cid}")
         else:
             name = args.name
-        out = export_one(cfg, acc, args.cid, name or args.name)
+        ids = [m["id"] for m in _message_index(cfg, acc, args.cid)]
+        out = precise_export(cfg, acc, args.cid, name or args.name, ids,
+                             zip_mode=args.zip_mode)
     elif args.command == "sync":
         out = sync(cfg, force=args.force)
     elif args.command == "cache":
@@ -2153,7 +2734,8 @@ def main():
             out = messages_window(cfg, acc, args.cid, args.range, args.start, args.end)
         else:
             out = precise_export(cfg, acc, args.cid, args.name,
-                                 [x.strip() for x in args.ids.split(",") if x.strip()])
+                                 [x.strip() for x in args.ids.split(",") if x.strip()],
+                                 zip_mode=args.zip_mode)
     else:
         out = {"fingerprints": {a["id"]: fingerprint(a) for a in cfg["accounts"]}}
     print(json.dumps(out, ensure_ascii=False, indent=2))

@@ -45,8 +45,17 @@ ALL_FOR_AI.md
 _smoke*
 _ui_*
 _http_*
+_probe*
+_qa*
 test_*.tmp
 *.tmp
 *.swp
 .DS_Store
 Thumbs.db
+
+# ------- 桌面快捷方式与导出压缩包（绝不上传导出内容） -------
+*.lnk
+*.zip
+*.rar
+*.7z
+*.ico.tmp

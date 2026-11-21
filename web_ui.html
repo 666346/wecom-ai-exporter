@@ -114,6 +114,10 @@ label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;cursor:p
 .fwd-body{border-top:1px solid #dbeafe;padding:6px 12px 10px;max-height:560px;overflow:auto;background:#fff}
 .fwd-item{padding:8px 0;border-bottom:1px dashed #e5ebff}
 .fwd-item:last-child{border-bottom:none}
+.fwd-parent{border-left:3px solid #60a5fa;padding-left:9px;background:#f5f9ff}
+.fwd-nested{font-size:11.5px;color:#1d4ed8;background:#eff6ff;border-radius:6px;
+  padding:4px 8px;margin:4px 0 6px}
+.tag.layer{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8;font-weight:600}
 .fwd-meta{font-size:11px;color:var(--muted);margin-bottom:3px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
 .fwd-meta b{color:var(--text);font-size:11.5px}
 .fwd-text{font-size:12px;white-space:pre-wrap;word-break:break-word;color:#374151;margin:0}
@@ -157,7 +161,7 @@ label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;cursor:p
   <h2>② 群聊筛选 · 按时间勾选当前单子</h2>
   <p class="desc">左侧搜索框输入后 300ms 自动选中第一条匹配并联动右侧；合并转发卡片默认展开成嵌套对话，可看文字与缩略图。右侧每 8 秒静默同步新消息，保留勾选与滚动。</p>
   <div class="row" style="margin-bottom:10px">
-    <input type="search" id="search" placeholder="搜索群名或 conversation-id，例如：项目名 / 客户名 / R:...">
+    <input type="search" id="search" placeholder="搜索群名或 conversation-id，例如：建模 / 300 / R:2578">
     <span class="small" id="groupCount">—</span>
   </div>
   <div class="split">
@@ -202,12 +206,17 @@ label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;cursor:p
 
 <section class="card">
   <h2>③ 一键导出给 AI</h2>
-  <p class="desc">只导出右侧已勾选的消息；合并转发卡片在原位置按子消息时间正序完整展开，图片/文件与主聊天共用 001、002… 统一编号。</p>
+  <p class="desc">只导出右侧已勾选的消息；合并转发卡片在原位置按子消息时间正序完整展开，图片/文件与主聊天共用 001、002… 统一编号，最后整体打包成单个 ZIP。</p>
   <div class="scope" id="exportScope">请先在右侧勾选消息</div>
   <div class="row">
     <button class="btn primary" id="btnExport" disabled>一键导出给 AI</button>
-    <button class="btn" id="btnOpen" disabled>打开导出文件夹</button>
-    <span class="small">输出：桌面\企业微信导出\&lt;群名&gt;\发给AI\</span>
+    <button class="btn" id="btnOpen" disabled>定位 ZIP（自动选中）</button>
+    <button class="btn" id="btnDownload" disabled>浏览器下载 ZIP</button>
+    <span class="small">输出：单个 ZIP 到 桌面\企业微信导出\，不再生成群文件夹</span>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <label class="small"><input type="checkbox" id="zipTimestamp" checked> 带时间戳 ZIP（YYYYMMDD-HHMMSS_群名.zip，不覆盖旧包）</label>
+    <label class="small"><input type="checkbox" id="autoLocate" checked> 导出完成后自动在资源管理器里选中 ZIP</label>
   </div>
   <div id="taskLog" style="display:none"></div>
   <div id="exportResult"><div class="hint">先在上方选中群并勾选消息，再点击「一键导出给 AI」。</div></div>
@@ -233,6 +242,7 @@ label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;cursor:p
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const S = { groups:[], watched:[], selected:null, syncEnabled:false, lastOutDir:null,
+            lastZipPath:null, lastZipName:null,
             range:'7d', messages:[], selIds:new Set(), rendered:0, PAGE:150,
             lastId:'', liveBusy:false, liveAt:'', searchTimer:null, loadSeq:0 };
 let msgTimer = null;
@@ -343,23 +353,32 @@ function forwardHTML(m){
   const base='/api/thumb?cid='+encodeURIComponent(g.id)+'&account='+encodeURIComponent(g.account)+
              '&mid='+encodeURIComponent(m.id);
   const subs=(c.subs||[]).map((s,si)=>{
+    const depth=Math.max(1,Math.min(s.depth||1,6));
     const files=(s.files||[]).map((f,fi)=>{
       const label=esc(f.name||'图片');
       if(f.thumb){
         const src=base+'&i='+si+'&j='+fi;
         return `<img class="fwd-thumb" loading="lazy" src="${src}" data-full="${src}" title="${label} · 点击放大">`;
       }
-      return `<span class="fwd-file">📎 ${label}<span class="fwd-miss">未缓存：点开该合并转发卡片并查看原图/下载文件后重新导出</span></span>`;
+      if(f.match){
+        return `<span class="fwd-file">📎 ${label} <span class="small">已精准匹配（${esc(f.match)}）· 导出时按原格式打包</span></span>`;
+      }
+      return `<span class="fwd-file">📎 ${label}<span class="fwd-miss">未缓存：点开该卡片并查看原图/下载文件后重新导出</span></span>`;
     }).join('');
-    return `<div class="fwd-item">
-      <div class="fwd-meta"><span class="mono">${esc(s.time)}</span><b>${esc(s.sender)}</b>
+    const cardNote=s.is_card
+      ? `<div class="fwd-nested">🧩 ${esc(s.card_title||'合并转发聊天记录')} · 以下为该层子消息（按原始时间正序）</div>` : '';
+    return `<div class="fwd-item ${s.is_card?'fwd-parent':''}" style="margin-left:${(depth-1)*20}px">
+      <div class="fwd-meta"><span class="tag layer">第${depth}层转发</span>
+        <span class="mono">${esc(s.time)}</span><b>${esc(s.sender)}</b>
         <span class="tag">${esc(s.kind)}</span></div>
+      ${cardNote}
       <p class="fwd-text">${esc(s.text||'（图片/文件，无文字正文）')}</p>
       ${files?`<div class="fwd-files">${files}</div>`:''}
     </div>`;
   }).join('');
+  const total=c.total_files??c.images??0;
   return `<details class="fwd" open>
-    <summary>🧩 合并转发 · ${esc(c.title)} · ${c.count} 条子消息 / ${c.images} 个图片与文件（已精准匹配 ${c.matched}）</summary>
+    <summary>🧩 ${esc(c.card_type||'合并转发')} · ${esc(c.title)} · ${c.count} 条 / ${c.levels||1} 层嵌套 / ${total} 个附件（已精准匹配 ${c.matched}，未缓存 ${c.missing}）</summary>
     <div class="fwd-body">${subs}</div></details>`;
 }
 
@@ -472,31 +491,39 @@ async function pollTask(id, done){
 function renderExport(task){
   if(task.status==='error'){
     $('#exportResult').innerHTML='<div class="missing" style="border-color:#fecaca;background:#fef2f2;color:#991b1b">导出失败：'+esc(task.error||'未知错误')+'</div>';
+    $('#btnOpen').disabled=true; $('#btnDownload').disabled=true;
     setMsg('导出失败', true); return;
   }
-  const d=task.result||{}, miss=d.missing||[], ai=d.all_for_ai||{}, files=d.files||[];
+  const d=task.result||{}, miss=d.missing||[], ai=d.all_for_ai||{}, files=d.files||[], entries=d.zip_entries||[], cnt=d.counts||{};
+  const classified=(ai.documents||0)+(ai.images||0)+(ai.other_files||0);
+  const consistent=(cnt.attachments??d.attachments_ok??0)===classified;
   $('#exportResult').innerHTML=`
     <div class="stats">
       <div class="stat"><b>${d.messages||0}</b><span>已选消息（时间正序）</span></div>
       <div class="stat"><b>${d.attachments_ok||0}</b><span>精准匹配附件</span></div>
+      <div class="stat"><b>${entries.length}</b><span>ZIP 内条目</span></div>
       <div class="stat"><b>${ai.documents||0}</b><span>展开的文档正文</span></div>
       <div class="stat"><b>${ai.images||0}</b><span>图片附件</span></div>
-      <div class="stat"><b>${ai.forward_cards||0}</b><span>合并转发卡片 / ${ai.forward_subs||0} 条子消息</span></div>
+      <div class="stat"><b>${ai.other_files||0}</b><span>其它原格式文件</span></div>
+      <div class="stat"><b>${ai.forward_cards||0}</b><span>转发/图文卡片 · ${ai.forward_subs||0} 条（含各层）</span></div>
       <div class="stat"><b>${miss.length}</b><span>附件未下载</span></div>
+      <div class="stat"><b>${consistent?'✅':'⚠️'}</b><span>统计一致 ${cnt.attachments??d.attachments_ok??0} = ${classified}</span></div>
     </div>
-    <div class="path">📄 聊天记录：<code>${esc(d.chat_md||'—')}</code></div>
-    <div class="path">📄 单文件汇总：<code>${esc(ai.path||'—')}</code> ${ai.size_kb||0} KB</div>
-    <div class="path">📁 导出目录（Ctrl+A 全选拖给 AI）：<code>${esc(d.out_dir||'')}</code></div>
+    <div class="path">📦 ZIP 压缩包：<code>${esc(d.zip_path||'')}</code> ${d.zip_size_kb||0} KB</div>
+    <div class="path">📄 包内顺序：<code>000_chat.md → 001_… → … → ALL_FOR_AI.md</code>（共 ${entries.length} 个条目，按聊天出现顺序排列）</div>
+    <div class="path">📁 导出根目录：<code>${esc(d.export_root||d.out_dir||'')}</code>（只新增这一个 ZIP，不生成群文件夹）</div>
     <div class="filelist"><b>按聊天顺序编号的附件（共 ${files.length} 个）</b>
       ${files.length? files.slice(0,30).map(x=>`<div>${esc(x.number)} · ${esc(x.time)} · <code>${esc(x.renamed)}</code> ${x.size_kb} KB <span class="small">${esc(x.origin||'')}</span></div>`).join('') : '<div>本次没有匹配到附件</div>'}
-      ${files.length>30?`<div>… 其余 ${files.length-30} 个见导出目录 / ALL_FOR_AI.md 末尾清单</div>`:''}
+      ${files.length>30?`<div>… 其余 ${files.length-30} 个见 ZIP 内 ALL_FOR_AI.md 末尾清单</div>`:''}
     </div>
     <div class="missing"><b>附件未下载（合并转发里的图片：需点开卡片并查看原图/下载文件）</b>
       ${miss.length? miss.slice(0,20).map((m,i)=>`<div>${i+1}. 消息 ${esc(String(m.local_id))} · ${esc(m.reason)}<br><span class="small">${esc(m.hint||'')}</span></div>`).join('') : '<div>无，附件齐全 ✅</div>'}
-      ${miss.length>20?`<div>… 其余 ${miss.length-20} 个见 ALL_FOR_AI.md</div>`:''}
+      ${miss.length>20?`<div>… 其余 ${miss.length-20} 个见 ZIP 内 ALL_FOR_AI.md</div>`:''}
     </div>`;
-  S.lastOutDir=d.out_dir; $('#btnOpen').disabled=false;
-  setMsg('导出完成，可以打开 发给AI 目录 Ctrl+A 全选拖给 AI');
+  S.lastZipPath=d.zip_path; S.lastZipName=d.zip_name; S.lastOutDir=d.out_dir;
+  $('#btnOpen').disabled=false; $('#btnDownload').disabled=false;
+  setMsg('导出完成：已生成单个 ZIP，可直接拖给 AI');
+  if($('#autoLocate').checked) setTimeout(openFolder, 250);
 }
 
 async function doExport(){
@@ -505,10 +532,13 @@ async function doExport(){
   const ids=S.messages.filter(m=>S.selIds.has(m.id)).map(m=>m.id);
   if(!ids.length){ setMsg('请先勾选消息',true); return; }
   if(ids.length>1000 && !confirm('当前勾选了 '+ids.length+' 条消息，可能包含多个旧单子且导出耗时较长。\\n建议用「今天 / 近3天」或「从此条往后全选」缩小范围。确认仍要导出？')) return;
-  $('#btnExport').disabled=true;
-  $('#exportResult').innerHTML='<div class="hint">正在导出 '+ids.length+' 条消息并精准匹配附件…</div>';
+  $('#btnExport').disabled=true; $('#btnOpen').disabled=true; $('#btnDownload').disabled=true;
+  $('#exportResult').innerHTML='<div class="hint">正在导出 '+ids.length+' 条消息、匹配附件并打包为单个 ZIP…</div>';
   try{
-    const t=await api('/api/export', {cid:g.id, account:g.account, name:g.name, ids});
+    const t=await api('/api/export', {
+      cid:g.id, account:g.account, name:g.name, ids,
+      zip_mode: $('#zipTimestamp').checked ? 'timestamp' : 'overwrite'
+    });
     await pollTask(t.task_id, renderExport);
   }catch(e){ $('#exportResult').innerHTML='<div class="hint">导出失败：'+esc(e.message)+'</div>'; setMsg(e.message,true); }
   finally{ updateSelStat(); }
@@ -547,9 +577,18 @@ function renderSyncControls(){
 }
 
 async function openFolder(){
-  if(!S.lastOutDir){ setMsg('请先导出',true); return; }
-  try{ await api('/api/open-folder',{path:S.lastOutDir}); setMsg('已打开 发给AI 目录'); }
+  if(!S.lastZipPath){ setMsg('请先导出生成 ZIP',true); return; }
+  try{ await api('/api/open-folder',{path:S.lastZipPath}); setMsg('已在资源管理器中定位并选中 ZIP'); }
   catch(e){ setMsg(e.message,true); }
+}
+
+function downloadZip(){
+  if(!S.lastZipPath){ setMsg('请先导出生成 ZIP',true); return; }
+  const url='/api/download-zip?path='+encodeURIComponent(S.lastZipPath);
+  const a=document.createElement('a');
+  a.href=url; a.download=S.lastZipName||'export.zip';
+  document.body.appendChild(a); a.click(); a.remove();
+  setMsg('已触发浏览器下载 ZIP');
 }
 
 async function loadAll(){
@@ -580,6 +619,7 @@ $('#btnRescan').addEventListener('click', doRescan);
 $('#btnReload').addEventListener('click', async ()=>{ setMsg('正在刷新…'); try{ await api('/api/refresh',{}); await loadAll(); if(S.selected) await loadMessages(); }catch(e){setMsg(e.message,true);} });
 $('#btnExport').addEventListener('click', doExport);
 $('#btnOpen').addEventListener('click', openFolder);
+$('#btnDownload').addEventListener('click', downloadZip);
 $('#btnSync').addEventListener('click', syncToggle);
 
 $$('.fbtn[data-range]').forEach(b=>b.addEventListener('click',()=>{

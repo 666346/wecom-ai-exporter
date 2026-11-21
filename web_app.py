@@ -7,6 +7,7 @@
 """
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -17,7 +18,7 @@ import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -80,21 +81,30 @@ def start_task(fn, **kwargs):
     return task_id
 
 
-def task_export(emit, cid, account, name, ids):
+def task_export(emit, cid, account, name, ids, zip_mode="timestamp"):
     cfg = T.load_config()
     acc = next((a for a in cfg["accounts"] if a["id"] == account), None)
     if acc is None:
         raise RuntimeError(f"账号 {account} 不在配置中，请先点「重新扫描企微账号与密钥」")
     emit(f"开始导出：{name or cid}（已勾选 {len(ids)} 条消息）")
-    emit("清空旧的 发给AI/ 目录，按文件名精准匹配当前账号缓存…")
-    result = T.precise_export(cfg, acc, cid, name, ids)
+    emit("在 runtime/tmp_export 临时目录生成聊天记录和编号附件，随后打包为单个 ZIP…")
+    result = T.precise_export(cfg, acc, cid, name, ids, zip_mode=zip_mode)
     emit(f"聊天导出完成：{result['messages']} 条消息 / {result['attachments_ok']} 个附件"
          f"（扫描缓存 {result['cache_files_scanned']} 个文件，只取命中项）")
     ai = result.get("all_for_ai") or {}
-    emit(f"ALL_FOR_AI.md 已生成：{ai.get('path')}（{ai.get('size_kb')} KB，"
+    counts = result.get("counts") or {}
+    emit(f"ALL_FOR_AI.md 已在 ZIP 内生成（{ai.get('size_kb')} KB，"
          f"展开 {ai.get('documents')} 个文档正文 / {ai.get('images')} 张图片 / "
-         f"{ai.get('forward_cards', 0)} 张合并转发卡片共 {ai.get('forward_subs', 0)} 条子消息）")
-    emit(f"输出目录：{result['out_dir']}")
+         f"{ai.get('other_files')} 个其它原格式文件）")
+    emit(f"卡片递归展开：{ai.get('forward_cards', 0)} 张（合并转发/图文混排）共 "
+         f"{ai.get('forward_subs', 0)} 条子消息（含各层）；卡片附件 "
+         f"{counts.get('card_total_files', 0)} 个 = 已匹配 {counts.get('card_matched', 0)} 个 "
+         f"+ 未缓存 {counts.get('card_missing', 0)} 个")
+    emit(f"统计自检：实际打包 {counts.get('attachments', 0)} = 分类合计 "
+         f"{counts.get('classified', 0)}，未下载 {counts.get('missing', 0)} 个")
+    emit(f"ZIP 已生成：{result['zip_path']}"
+         f"（{result['zip_size_kb']} KB / {len(result['zip_entries'])} 个包内条目）")
+    emit("临时目录已清理；导出根目录只新增这一个 ZIP，不再生成群文件夹")
     emit(f"missing 附件 {len(result.get('missing') or [])} 个"
          "（合并转发里的图片需在企业微信点开卡片查看原图/下载文件后重新导出）")
     return result
@@ -130,7 +140,8 @@ def sync_worker():
                 for item in result.get("results", []):
                     if item.get("messages"):
                         log(f"[sync]   {item.get('name')} → {item['messages']} 条 / "
-                            f"{item.get('attachments_ok', 0)} 附件 / missing {len(item.get('missing') or [])}")
+                            f"{item.get('attachments_ok', 0)} 附件 / ZIP {item.get('zip_name', '')} / "
+                            f"missing {len(item.get('missing') or [])}")
                 for error in result.get("errors", []):
                     log(f"[sync]   ERR {error}")
         except Exception as exc:
@@ -181,6 +192,25 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False, indent=2),
                    "application/json; charset=utf-8")
+
+    def _send_zip(self, target):
+        size = target.stat().st_size
+        filename = target.name
+        ascii_name = filename.encode("ascii", "replace").decode("ascii")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}",
+        )
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            with target.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile, 1024 * 1024)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -275,18 +305,22 @@ class Handler(BaseHTTPRequestHandler):
                         task = dict(TASKS.get(task_id, {"status": "missing",
                                                         "error": "任务不存在", "log": []}))
                     return self._json(task)
+                if path == "/api/download-zip":
+                    target = T.resolve_export_zip(query.get("path", [""])[0])
+                    return self._send_zip(target)
 
             if method == "POST":
                 if path == "/api/export":
                     cid, account = body.get("cid"), body.get("account")
                     ids = body.get("ids") or []
+                    zip_mode = body.get("zip_mode") or "timestamp"
                     if not cid or not account:
                         raise RuntimeError("缺少 cid / account")
                     if not ids:
                         raise RuntimeError("没有勾选任何消息，请先在右侧列表里选择")
                     return self._json({"task_id": start_task(
                         task_export, cid=cid, account=account, name=body.get("name"),
-                        ids=[str(x) for x in ids])})
+                        ids=[str(x) for x in ids], zip_mode=zip_mode)})
                 if path == "/api/rescan":
                     return self._json({"task_id": start_task(task_rescan)})
                 if path == "/api/refresh":
